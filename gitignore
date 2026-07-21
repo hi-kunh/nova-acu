@@ -1,0 +1,13 @@
+# 빌드 산출물
+acud
+*.o
+build/
+
+# 로컬 DB / 설정 (나중 단계용)
+*.db
+*.sqlite3
+
+# 에디터 / OS
+.vscode/
+*.swp
+.DS_Store
