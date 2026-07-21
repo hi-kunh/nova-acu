@@ -19,19 +19,22 @@ static volatile sig_atomic_t g_running = 1;  /* 0이 되면 메인 루프 종료
 static volatile sig_atomic_t g_reload  = 0;  /* 1이 되면 설정 다시 읽기 */
 
 /* 종료 시그널 핸들러 (SIGTERM, SIGINT) */
-static void on_stop(int sig) {
+static void on_stop(int sig)
+{
     (void)sig;
     g_running = 0;
 }
 
 /* 리로드 시그널 핸들러 (SIGHUP) */
-static void on_reload(int sig) {
+static void on_reload(int sig)
+{
     (void)sig;
     g_reload = 1;
 }
 
 /* 타임스탬프가 붙은 간단한 로그 출력 */
-static void log_msg(const char *msg) {
+static void log_msg(const char *msg)
+{
     time_t now = time(NULL);
     struct tm tm;
     char ts[32];
@@ -41,7 +44,8 @@ static void log_msg(const char *msg) {
     fflush(stdout);  /* headless 환경에서 로그가 즉시 보이도록 버퍼를 비운다 */
 }
 
-int main(void) {
+int main(void)
+{
     /* 시그널 핸들러 등록 */
     struct sigaction sa_stop = {0};
     sa_stop.sa_handler = on_stop;
@@ -55,8 +59,10 @@ int main(void) {
     log_msg("ACU 데몬 시작");
 
     /* 메인 루프: 종료 시그널이 올 때까지 계속 돈다 */
-    while (g_running) {
-        if (g_reload) {
+    while (g_running)
+    {
+        if (g_reload)
+        {
             g_reload = 0;
             log_msg("설정 리로드 요청 감지 (추후 config.json 재적용 예정)");
         }

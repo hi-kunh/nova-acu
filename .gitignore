@@ -1,5 +1,5 @@
 # 빌드 산출물
-acud
+/acud/acud
 *.o
 build/
 
