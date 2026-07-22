@@ -7,9 +7,9 @@
 
 - **[0단계] 데몬 뼈대**  완료 - `acud` 폴더
 - **[1단계] SQLite3 + 출입 판정 로직**  완료 (아래 "1단계 완료 기록" 참고)
-- 2단계: 하드웨어 추상화 계층(HAL) 인터페이스 확정
-- 3단계: config.json 감시 + 무중단 리로드
-- 4단계: 웹 설정 인터페이스 (Flask)
+- **[2단계] 하드웨어 추상화 계층(HAL) 인터페이스 확정**  완료 (아래 "2단계 완료 기록" 참고)
+- **[3단계] config.json 감시 + 무중단 리로드**  완료 (아래 "3단계 완료 기록" 참고)
+- **[4단계] 웹 설정 인터페이스 (Flask)**  완료, 1차 범위(config.json 편집)만 (아래 "4단계 완료 기록" 참고)
 - 5단계: 네트워크 통신부 (TCP/UDP)
 - 6단계: 실제 하드웨어 (GPIO / Wiegand : rk3566 시리얼 통신, rk3568 can bus)
 
@@ -24,15 +24,18 @@
 
 경로: `/home/jayden/workspace/idti/IDTI WebApp Protocol/`
 
-이 프로젝트가 반드시 호환해야 하는 기존 IDTi 프로토콜 문서 모음. 특히 아래 두 문서를 우선 확인함:
+이 프로젝트가 반드시 호환해야 하는 기존 IDTi 프로토콜 문서 모음. 지금까지 확인한 문서:
 
 - `1. IDTi Protocol V1_2_3 Basic structure.doc` — 패킷 프레임 기본 구조
+- `4. IDTi Protocol TimeZone & Holiday & Validation.doc` — 유효기간/시간대 그룹 구조 (1단계 참고)
 - `5. IDTi Protocol UserBinaryTransmit.doc` — 유저 DB 대량 전송(바이너리) 프로토콜
+- `7. IDTi Protocol Device Type Table.doc` — 장치 타입 코드 (2단계 HAL 참고)
+- `9. IDTi Protocol Relay(Output) & Sensor(Inout) Function.doc` — 릴레이/센서 구조 (2단계 HAL 참고)
 
 그 외 폴더 내 문서(향후 단계에서 필요할 때 참고):
-`2. Event Structure & Event Code`, `3. Member(User DB) Structure`, `4. TimeZone & Holiday & Validation`,
-`6. FileBinaryTransmit`, `7. Device Type Table`, `8. System Device Reader Setup`,
-`9. Relay(Output) & Sensor(Inout) Function`, `10. Group`, `11. User General Group`, `12. Canteen`,
+`2. Event Structure & Event Code`, `3. Member(User DB) Structure`,
+`6. FileBinaryTransmit`, `8. System Device Reader Setup`,
+`10. Group`, `11. User General Group`, `12. Canteen`,
 `13. Force OpenMode`, `14. Request Blocking User List`, `15. Elevator Group Setup`,
 `IDTi HW Device_Directory File Structure`, `IntelliScan Web Application Project`
 
@@ -67,6 +70,19 @@ Tail 필드: `Packet CheckBytes(0/2, XOR+SUM) Packet Checksum(1, 고정) ETX(1, 
 - 유저 레코드 구조체는 모델별로 다름 (`_BSCUserInfo` 1772byte / `_ISCUserInfo` 128byte / `_SSCUserInfo` 128byte / `_SSCUserInfoFinger` 1808byte)
 - 카드 전용(지문 없음) 모델 기준이면 `_ISCUserInfo`(128byte, `serial(4)+user(32)+card(12)+name(16)+restrict(8)+grpcode(16)+apb(1)+reserved(37)+crc_calc(1)+datacrc(1)`) 구조가 가장 근접 — **우리 카드 전용 데몬 스키마 설계 시 참고**
 
+### Device Type Table 요약 (`7.` 문서)
+
+- 장치를 카테고리별 1byte 코드로 구분: Server/Workstation/Com Slot, Controller(SSC 0x1f~/ISC 0x29~/BSC 0x33~), Built-In-Module, Remote Module(RIM/ROM/RRM/RXM), Reader(0x8d~0x91), Relay(0x97~0xaa), Sensor(0xab~0xff)
+- Sensor 카테고리 중 우리 장치와 관련 있는 것: `Door Contact 0xac`, `Lock State 0xad`, `Door Control(Exit Button) 0xae`
+- 우리 컨트롤러가 프로토콜상 어떤 타입 코드로 응답할지는 아직 미확정 (Controller(ISC) 계열 0x29~0x32가 카드 전용 컨트롤러로 가장 근접, HAL 헤더에는 참고용으로 `HAL_DEVICE_TYPE_ISC101 0x29`만 임시로 남겨둠)
+
+### Relay & Sensor 요약 (`9.` 문서)
+
+- **Device Output(Relay)**: Object `0x2D`, 채널 Index 1~254. 구조체 핵심 필드: `IsEnabled`, `ActiveType`(1=Door, 2=Alarm, 3=LockDown, 4=Continuous, 5=Time_Relay, 6=Fail Relay, 7=Door Status Relay, 8=Solenoid Relay), `ActiveTime`(1~99초)
+  - 우리 단일 도어 장치는 **Door Relay(ActiveType=1)** 만 사용: 인증 성공 시 `ActiveTime`초 동안 릴레이 동작
+- **Device Input(Sensor)**: Object `0x2C`, 채널 Index 1~254. 구조체 핵심 필드: `Use`(Exit/Alarm/Lock/Door/Intrusion/NoAction), `ActiveType`(0=Normal Close, 1=Normal Open)
+  - 우리 장치는 최소한 `Door Contact`(문 접점), `Exit Button`(비상/퇴실 버튼) 두 센서만 우선 반영
+
 ## 1단계 완료 기록 (SQLite3 + 출입 판정 로직)
 
 **구성**
@@ -86,6 +102,64 @@ Tail 필드: `Packet CheckBytes(0/2, XOR+SUM) Packet Checksum(1, 고정) ETX(1, 
 **검증 방법**: 더미 카드 6개로 허용/비활성/미등록/유효기간만료/그룹통과/시간대불일치 6가지 경로를 모두 실행 확인함 (`make run` 후 로그 출력으로 확인)
 
 **빌드 전제조건**: `libsqlite3-dev` 설치 필요 (`sudo apt-get install libsqlite3-dev`) — 이번 세션에서 설치 확인 완료
+
+## 2단계 완료 기록 (HAL 인터페이스 확정)
+
+**구성**
+- `acud/hal.h` — 카드 리더 입력(`hal_read_card`) / 도어 릴레이 출력(`hal_open_door`) / 센서 입력(`hal_read_sensor`) 인터페이스 정의
+- `acud/hal_mock.c` — 실제 GPIO/Wiegand(6단계 예정)가 없는 동안의 모의 구현체. 1단계 때 `main.c`에 있던 더미 카드ID 6개 순회 로직을 여기로 옮김
+- `acud/main.c` — 더 이상 더미 카드 배열을 직접 참조하지 않고, `hal_read_card()`로 카드를 받고 허용 시 `hal_open_door()`를 호출하도록 변경
+
+**설계 원칙**: `main.c`/`access.c`는 `hal.h` 인터페이스만 알고, 실제 하드웨어 유무와 무관하게 동일하게 동작한다. 6단계에서 `hal_rk3566.c`/`hal_rk3568.c`(실제 GPIO/Wiegand 구현체)로 교체할 때 `hal_mock.c`만 빼고 갈아끼우면 되도록 함
+
+**IDTi 프로토콜 대응**: HAL의 릴레이 동작은 Device Output(Relay) Object(`0x2D`)의 `ActiveType=1(Door Relay)` 의미를 따름 (`ActiveTime`은 현재 3초 상수, 3단계 config.json 도입 후 설정값으로 전환 예정). 센서 채널은 `Door Contact`/`Exit Button`만 우선 정의(그 외 Sensor Device Type은 필요 시 확장)
+
+**검증 방법**: `make run`으로 실행, 허용된 카드에서만 "HAL(mock): 도어 릴레이 3초 동작" 로그가 남고 거부된 카드는 릴레이가 동작하지 않음을 확인함
+
+## 3단계 완료 기록 (config.json 감시 + 무중단 리로드)
+
+**구성**
+- `acud/config.h`, `acud/config.c` — `config.json`을 [cJSON](https://github.com/DaveGamble/cJSON)으로 파싱해 `AcuConfig`(`db_path`, `door_open_seconds`)에 채움. 파일이 없거나 파싱 실패 시 기존 값을 그대로 유지(안전한 실패)
+- `acud/config.json` — 실행 파일과 같은 디렉터리에 두는 기본 설정 파일 (커밋 대상, DB 파일 자체와 달리 `.gitignore` 대상 아님)
+- `acud/main.c` — 시작 시 `config_set_defaults()` → `config_load()` 순으로 로드. `SIGHUP`을 받으면 `config_load()`를 다시 호출해 재시작 없이 적용: `door_open_seconds`는 다음 판정부터 바로 반영, `db_path`가 바뀌면 기존 DB를 닫고 새 경로로 다시 열어 교체
+
+**유효성 검사**: `door_open_seconds`는 IDTi Device Output(Relay)의 `ActiveTime` 범위(1~99초)를 벗어나면 리로드를 거부하고 기존 설정을 유지함
+
+**검증 방법**: 데몬 실행 중 `config.json`의 `door_open_seconds`를 3→10으로 바꾸고 `kill -HUP`을 보내 재시작 없이 "HAL(mock): 도어 릴레이 10초 동작"으로 즉시 바뀌는 것을 확인함. `config.json`을 삭제한 채 기동해도 기본값(3초)으로 정상 동작함을 확인함
+
+**빌드 전제조건**: `libcjson-dev` 설치 필요 (`sudo apt-get install libcjson-dev`) — 이번 세션에서 설치 확인 완료
+
+## 4단계 완료 기록 (웹 설정 인터페이스, 1차 범위: config.json 편집만)
+
+**범위**: 카드 관리 화면은 이번엔 제외하고, `acud/config.json`(`db_path`, `door_open_seconds`) 편집 화면만 우선 구현. 카드 CRUD는 추후 단계에서 추가 예정
+
+**구성**
+- `webui/app.py` — Flask 앱. `acud/config.json`을 직접 읽고 씀. 저장 시 `acud/acud.pid`에 적힌 PID로 `SIGHUP`을 보내 acud가 재시작 없이 반영하도록 함 (3단계 무중단 리로드 기능을 그대로 활용)
+- `webui/templates/index.html` — 설정 폼 1페이지 (db_path, door_open_seconds, 단말기 비밀번호 변경)
+- `webui/templates/login.html` — 로그인 화면 (숫자 4자리 단말기 비밀번호)
+- `webui/requirements.txt` — `Flask>=3.0,<4`
+- `acud/main.c` — 시작 시 `acud.pid`에 PID 기록, 정상 종료 시 삭제 (webui가 SIGHUP 보낼 대상을 찾기 위함)
+
+**유효성 검사**: `door_open_seconds`는 웹 폼에서도 1~99(IDTi Relay ActiveTime 범위)를 벗어나면 저장하지 않고 에러만 표시 (config.c의 검증과 동일한 규칙을 웹에서도 반복 적용)
+
+**로그인 게이트 (단말기 비밀번호)**: 설정 화면 진입 전, `config.json`의 `admin_password`(숫자 4자리, 기본값 `"0000"` — **반드시 변경 필요**)로 로그인해야 함. IDTi Header의 `Password(4byte)` / User Info의 `Password(2byte BCD)` 필드와 같은 맥락의 "단말기 비밀번호" 개념으로, 호스트 PC 디바이스 관리 매니저 프로그램의 비밀번호 설정 기능에 대응시킴
+- `acud/config.h`/`config.c`: `AcuConfig.admin_password` 필드 추가, 숫자 4자리가 아니면 리로드 자체를 거부(다른 필드와 동일한 fail-safe 규칙)
+- `webui`: Flask `session`으로 로그인 상태 관리 (`login_required` 데코레이터), 설정 화면에서 새 비밀번호(+확인) 입력 시에만 변경, 저장하면 다른 설정과 함께 `config.json`에 반영되고 SIGHUP으로 acud에도 전파됨
+- 로그인 실패 시 1초 지연만 두어 무차별 대입을 최소한으로 늦춤
+
+**보안 관련 미해결 사항 (중요)**: 숫자 4자리 PIN은 경우의 수가 10000개뿐이라 그 자체로 약하다. 실패 횟수 제한/계정 잠금, HTTPS, CSRF 방어, 사내망 한정 바인딩은 아직 없음 — 지금은 로컬 개발/검증 목적으로만 사용, 실제 배포 전 반드시 강화 필요
+
+**검증 방법**: `acud` 실행 → `webui` Flask 개발 서버 실행 → 로그인 없이 `/` 접근 시 `/login`으로 리다이렉트됨을 확인 → 기본 비밀번호(`0000`)로 로그인 → 폼으로 `door_open_seconds`를 3→7로 저장 → acud 로그에 "설정 리로드 완료"가 찍히고 실제 도어 릴레이 동작 시간이 바뀜을 확인. 범위를 벗어난 값(150)을 보내면 config.json이 바뀌지 않고 에러 메시지만 표시됨을 확인. 새 비밀번호(1234)로 변경 후 config.json에 반영되고 acud가 리로드됨을 확인
+
+**실행 방법**
+```bash
+cd webui
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt
+./.venv/bin/python app.py   # http://localhost:5000
+```
+
+**빌드 전제조건**: `python3-venv` 설치 필요 (`sudo apt-get install python3-venv`) — 이번 세션에서 설치 확인 완료
 
 ## 빌드 & 실행
 

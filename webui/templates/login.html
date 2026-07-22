@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>ACU 로그인</title>
+  <style>
+    body { font-family: sans-serif; max-width: 320px; margin: 80px auto; padding: 0 16px; text-align: center; }
+    label { display: block; margin-top: 16px; font-weight: bold; }
+    input { width: 100%; padding: 8px; box-sizing: border-box; margin-top: 4px;
+            text-align: center; font-size: 1.4em; letter-spacing: 0.3em; }
+    button { margin-top: 20px; padding: 8px 16px; width: 100%; }
+    .flash { padding: 8px 12px; margin-top: 12px; border-radius: 4px; }
+    .flash.error { background: #f2dede; color: #a94442; }
+  </style>
+</head>
+<body>
+  <h1>ACU 단말기 비밀번호</h1>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="post">
+    <label for="password">비밀번호 (숫자 4자리)</label>
+    <input type="password" id="password" name="password" inputmode="numeric"
+           pattern="\d{4}" maxlength="4" autofocus required>
+    <button type="submit">확인</button>
+  </form>
+</body>
+</html>

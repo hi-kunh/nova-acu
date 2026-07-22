@@ -6,6 +6,12 @@ build/
 # 로컬 DB / 설정 (나중 단계용)
 *.db
 *.sqlite3
+*.pid
+
+# Python venv (웹 설정 인터페이스)
+webui/.venv/
+__pycache__/
+*.pyc
 
 # 에디터 / OS
 .vscode/
