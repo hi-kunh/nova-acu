@@ -6,7 +6,7 @@
 ## 개발 단계
 
 - **[0단계] 데몬 뼈대**  완료 - `acud` 폴더
-- **[1단계] SQLite3 + 출입 판정 로직**  진행 중 (아래 "1단계 진행 메모" 참고)
+- **[1단계] SQLite3 + 출입 판정 로직**  완료 (아래 "1단계 완료 기록" 참고)
 - 2단계: 하드웨어 추상화 계층(HAL) 인터페이스 확정
 - 3단계: config.json 감시 + 무중단 리로드
 - 4단계: 웹 설정 인터페이스 (Flask)
@@ -67,26 +67,25 @@ Tail 필드: `Packet CheckBytes(0/2, XOR+SUM) Packet Checksum(1, 고정) ETX(1, 
 - 유저 레코드 구조체는 모델별로 다름 (`_BSCUserInfo` 1772byte / `_ISCUserInfo` 128byte / `_SSCUserInfo` 128byte / `_SSCUserInfoFinger` 1808byte)
 - 카드 전용(지문 없음) 모델 기준이면 `_ISCUserInfo`(128byte, `serial(4)+user(32)+card(12)+name(16)+restrict(8)+grpcode(16)+apb(1)+reserved(37)+crc_calc(1)+datacrc(1)`) 구조가 가장 근접 — **우리 카드 전용 데몬 스키마 설계 시 참고**
 
-## 1단계 진행 메모 (SQLite3 + 출입 판정 로직)
+## 1단계 완료 기록 (SQLite3 + 출입 판정 로직)
 
-`acud/main.c`의 TODO 위치: "카드 ID 입력 확인 → SQLite3 조회 → 출입 판정"
+**구성**
+- `acud/log.h`, `acud/log.c` — 타임스탬프 로그 출력 (`main.c`/`access.c` 공용)
+- `acud/db.h`, `acud/db.c` — SQLite3 open/close, 스키마 초기화, 카드/유효기간/시간대 조회
+- `acud/access.h`, `acud/access.c` — 조회 결과로 출입 허용/거부 판정
+- `acud/main.c` — 실제 리더기(6단계 예정)가 없으므로, 더미 카드ID 6개를 순회하며 판정 로직을 검증
 
-**오늘까지 결정된 것**
-- 카드 ID 입력은 아직 실제 리더기(6단계 예정)가 없으므로, **테스트용 더미 카드ID 목록을 코드에 하드코딩해서 순회**하는 방식으로 우선 판정 로직만 검증
-- 기존 STM32 장치와 **동일한 IDTi 프로토콜**로 통신 가능하도록 만드는 것이 최종 목표 — DB 스키마와 판정 결과 구조를 위 IDTi User Info(32byte)/이벤트 로그 구조와 최대한 맞춰서 설계할 것
+**DB 스키마** (IDTi User Info(32byte) 필드 대응, 카드 전용 모델 기준)
+- `cards`: `card_id, user_id, is_enabled, level, validation_code, timezone_code`
+- `validations` (IDTi Validation ID 1~1024 대응): `validation_id, start_date, end_date` — 유효기간 그룹. `validation_code=0`이면 그룹 없음(무조건 유효)
+- `timezones` (IDTi Timezone ID 1~1024 대응, 그룹당 슬롯 최대 4개): `timezone_id, slot_index, start_hour, start_min, end_hour, end_min, week_select` — `week_select`는 16bit 비트마스크(`bit15=일 ... bit9=토`, `bit8~0=공휴일1~9`, `4. TimeZone & Holiday & Validation.doc` 참고). `timezone_code=0`이면 그룹 없음(무조건 허용)
+- **공휴일 캘린더(Device Holiday)는 아직 미구현** — `week_select`의 공휴일 비트(bit8~0)는 반영되지 않음, 요일 비트만 확인함 → 향후 필요 시 별도 단계로 구현
 
-**다음에 결정/진행할 것**
-- `cards` 테이블 스키마 확정 (IDTi User Info 필드 대응: card_id, user_id, 활성여부(IsEnable), 유효기간(Validation), Timezone Code 등 어디까지 반영할지)
-- `db.h/db.c`: sqlite3 open/close, 스키마 초기화, 카드ID 조회 함수
-- `access.h/access.c`: 조회 결과로 허용/거부 판정, 추후 IDTi 이벤트 코드 형식에 맞는 결과 로그
-- `Makefile`에 `-lsqlite3` 추가
+**판정 순서** (`access_judge`): 카드 조회 → 비활성화 여부 → 유효기간(Validation) → 시간대(Timezone) 순으로 확인, 하나라도 걸리면 즉시 거부
 
-## 하우스키핑 (다음 세션 시작 전 확인)
+**검증 방법**: 더미 카드 6개로 허용/비활성/미등록/유효기간만료/그룹통과/시간대불일치 6가지 경로를 모두 실행 확인함 (`make run` 후 로그 출력으로 확인)
 
-- **README 정리 완료** (이전에 git 병합 충돌 마커 `<<<<<<< HEAD` ~ `>>>>>>>`가 텍스트로 커밋되어 있었음, 이번에 정리함)
-- `gitignore` 파일명에 점(`.`)이 빠져 있어 `.gitignore`로 동작하지 않음 → 이름 변경 필요 (현재 `acud/acud` 바이너리가 untracked로 잡힘)
-- `libsqlite3-dev` 미설치 (런타임 `libsqlite3-0`만 설치되어 있음) → `sqlite3.h` 필요해서 1단계 컴파일 전 설치 필요
-- 최상위 `Makefile`/`main.c`가 삭제되고 `acud/` 밑으로 옮겨졌는데 아직 커밋 안 됨 (git status에 D로 표시) → 커밋 정리 필요
+**빌드 전제조건**: `libsqlite3-dev` 설치 필요 (`sudo apt-get install libsqlite3-dev`) — 이번 세션에서 설치 확인 완료
 
 ## 빌드 & 실행
 

@@ -1,10 +1,11 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -O2
+LDLIBS  = -lsqlite3
 TARGET  = acud
-SRC     = main.c
+SRC     = main.c log.c db.c access.c
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDLIBS)
 
 run: $(TARGET)
 	./$(TARGET)
