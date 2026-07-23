@@ -12,12 +12,14 @@
 #define ACU_DEFAULT_DOOR_OPEN_SECONDS 3
 /* 최초 기본값. 반드시 웹 설정 화면에서 변경해야 하는 값 - 절대 이 기본값 그대로 배포하면 안 됨 */
 #define ACU_DEFAULT_ADMIN_PASSWORD "0000"
+#define ACU_DEFAULT_TCP_PORT 9870
 
 void config_set_defaults(AcuConfig *cfg)
 {
     snprintf(cfg->db_path, sizeof(cfg->db_path), "%s", ACU_DEFAULT_DB_PATH);
     cfg->door_open_seconds = ACU_DEFAULT_DOOR_OPEN_SECONDS;
     snprintf(cfg->admin_password, sizeof(cfg->admin_password), "%s", ACU_DEFAULT_ADMIN_PASSWORD);
+    cfg->tcp_port = ACU_DEFAULT_TCP_PORT;
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -92,6 +94,7 @@ int config_load(const char *path, AcuConfig *cfg)
     const cJSON *db_path = cJSON_GetObjectItemCaseSensitive(root, "db_path");
     const cJSON *door_open_seconds = cJSON_GetObjectItemCaseSensitive(root, "door_open_seconds");
     const cJSON *admin_password = cJSON_GetObjectItemCaseSensitive(root, "admin_password");
+    const cJSON *tcp_port = cJSON_GetObjectItemCaseSensitive(root, "tcp_port");
 
     if (!cJSON_IsString(db_path) || db_path->valuestring[0] == '\0')
     {
@@ -113,10 +116,17 @@ int config_load(const char *path, AcuConfig *cfg)
         cJSON_Delete(root);
         return -1;
     }
+    if (!cJSON_IsNumber(tcp_port) || tcp_port->valueint < 1 || tcp_port->valueint > 65535)
+    {
+        log_msg("config.json: tcp_port 필드가 없거나 1~65535 범위를 벗어남 - 기존 설정 유지");
+        cJSON_Delete(root);
+        return -1;
+    }
 
     snprintf(cfg->db_path, sizeof(cfg->db_path), "%s", db_path->valuestring);
     cfg->door_open_seconds = door_open_seconds->valueint;
     snprintf(cfg->admin_password, sizeof(cfg->admin_password), "%s", admin_password->valuestring);
+    cfg->tcp_port = tcp_port->valueint;
 
     cJSON_Delete(root);
     return 0;

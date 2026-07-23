@@ -1,5 +1,6 @@
 {
     "db_path": "acud.db",
     "door_open_seconds": 3,
-    "admin_password": "0000"
+    "admin_password": "0000",
+    "tcp_port": 9870
 }

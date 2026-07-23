@@ -10,7 +10,7 @@
 - **[2단계] 하드웨어 추상화 계층(HAL) 인터페이스 확정**  완료 (아래 "2단계 완료 기록" 참고)
 - **[3단계] config.json 감시 + 무중단 리로드**  완료 (아래 "3단계 완료 기록" 참고)
 - **[4단계] 웹 설정 인터페이스 (Flask)**  완료, 1차 범위(config.json 편집)만 (아래 "4단계 완료 기록" 참고)
-- 5단계: 네트워크 통신부 (TCP/UDP)
+- **[5단계] 네트워크 통신부 (TCP, IDTi 프로토콜 V2)**  완료, 1차 범위(Event Log 조회 응답)만 (아래 "5단계 완료 기록" 참고)
 - 6단계: 실제 하드웨어 (GPIO / Wiegand : rk3566 시리얼 통신, rk3568 can bus)
 
 ## 대상 하드웨어
@@ -26,14 +26,15 @@
 
 이 프로젝트가 반드시 호환해야 하는 기존 IDTi 프로토콜 문서 모음. 지금까지 확인한 문서:
 
-- `1. IDTi Protocol V1_2_3 Basic structure.doc` — 패킷 프레임 기본 구조
+- `1. IDTi Protocol V1_2_3 Basic structure.doc` — 패킷 프레임 기본 구조 (5단계 네트워크 통신부 핵심 참고)
+- `2. IDTi Protocol Event Structure & Event Code.doc` — Event Log(History) 구조와 Event Code 표 (5단계 참고)
 - `4. IDTi Protocol TimeZone & Holiday & Validation.doc` — 유효기간/시간대 그룹 구조 (1단계 참고)
 - `5. IDTi Protocol UserBinaryTransmit.doc` — 유저 DB 대량 전송(바이너리) 프로토콜
 - `7. IDTi Protocol Device Type Table.doc` — 장치 타입 코드 (2단계 HAL 참고)
 - `9. IDTi Protocol Relay(Output) & Sensor(Inout) Function.doc` — 릴레이/센서 구조 (2단계 HAL 참고)
 
 그 외 폴더 내 문서(향후 단계에서 필요할 때 참고):
-`2. Event Structure & Event Code`, `3. Member(User DB) Structure`,
+`3. Member(User DB) Structure`,
 `6. FileBinaryTransmit`, `8. System Device Reader Setup`,
 `10. Group`, `11. User General Group`, `12. Canteen`,
 `13. Force OpenMode`, `14. Request Blocking User List`, `15. Elevator Group Setup`,
@@ -160,6 +161,71 @@ python3 -m venv .venv
 ```
 
 **빌드 전제조건**: `python3-venv` 설치 필요 (`sudo apt-get install python3-venv`) — 이번 세션에서 설치 확인 완료
+
+## 5단계 완료 기록 (네트워크 통신부, 1차 범위: Event Log 조회 응답만)
+
+**범위**: 상위 시스템(PC)이 TCP로 접속해 Event Log(History, Object `0x01`)를 요청하면 출입 판정 결과를
+IDTi Event Structure(36byte)로 응답하는 것까지만 구현. 유저 DB 송수신(UserBinaryTransmit), Device Output
+원격 제어, Time Sync 등 그 외 요청은 로그만 남기고 무시함 (추후 단계에서 필요한 것만 확장 예정). UDP는
+프로토콜 문서상 RRE/Alarm Server 같은 부가 기능에만 쓰이고 PC-Controller 핵심 통신은 Frame Option의
+`IsTCP` 비트가 있는 TCP 쪽이라 이번 단계는 TCP만 구현함.
+
+**프로토콜 버전**: V2(44byte 헤더, Address 13byte, Device Status 234byte)를 사용. V1은 헤더가 작지만 상위
+시스템과의 호환성 관점에서 V2/V3가 더 널리 쓰이고, V3(Device Status 1100byte, 최대 128리더)는 우리
+단일 도어/단일 리더 장치에는 과함 - V2가 딱 맞는 절충점. IO 확장 모듈이 없는 장치이므로 Device Status의
+`ExistedModule` 비트마스크는 항상 0, IO Module 배열(14개 * 16byte)은 전부 0으로 채움.
+
+**구성**
+- `acud/protocol.h`, `acud/protocol.c` — IDTi V2 패킷 프레임(Header 44byte/Tail 2byte) 파싱·생성, Header
+  Checksum(XOR) 계산, BCD 변환. 실제 소켓 코드와 분리해 두어 유닛 테스트하기 쉽게 함
+- `acud/net.h`, `acud/net.c` — TCP 서버(동시 1개 연결만 지원, select 기반 non-blocking), 32개 링버퍼로 된
+  이벤트 큐, Event Log 요청 처리(Device Status + 대기 중인 이벤트 1건을 얹어 응답)
+- `acud/config.h`/`config.c`/`config.json` — `tcp_port` 필드 추가(기본값 9870, 1~65535 검증). SIGHUP으로
+  포트가 바뀌면 기존 리스닝 소켓을 닫고 새 포트로 재개설(재시작 없이 전환), DB 경로 전환과 동일한 패턴
+- `acud/main.c` — `hal_read_card()`/`access_judge()` 결과를 `net_push_event()`로 큐에 넣고,
+  `net_poll()`로 접속/요청을 처리. 도어 센서 상태(`hal_read_sensor`)도 매 조회 시각마다 갱신해 Event
+  Info의 Door Status 필드에 반영
+- `webui/app.py` — `tcp_port`가 저장/전달 과정에서 유실되지 않도록 기본 설정 목록에 추가만 함 (편집 화면은
+  아직 없음, 카드 CRUD처럼 추후 단계에서 필요해지면 추가)
+
+**Event Code 매핑** (`2. IDTi Protocol Event Structure & Event Code.doc` 참고)
+- `ACCESS_GRANTED` → `Access Authorized By Card`(`0x01010102`), Access ID = User ID
+- `ACCESS_DENIED_DISABLED` → `Access Denied By Not Enabled`(`0x01020108`)
+- `ACCESS_DENIED_TIMEZONE` → `Access Denied By Time`(`0x01020109`)
+- `ACCESS_DENIED_NOT_FOUND`/`ACCESS_DENIED_VALIDATION` → 문서에 더 구체적인 코드가 없어 일반 코드인
+  `Access Denied By Card`(`0x01020102`)로 대체. 위 세 가지를 제외한 거부 사유는 모두 Access ID = Card ID
+- `ACCESS_DENIED_DB_ERROR`는 내부 오류라 상위 시스템에 보고할 실질적 의미가 없어 이벤트 큐에 넣지 않음
+  (로컬 로그로만 남김)
+
+**이벤트 큐**: 카드 판정마다 매번 큐에 넣는다(허용/거부 모두). 32개 고정 크기 링버퍼이며, 가득 차면 가장
+오래된 이벤트를 버리고 계속 진행(fail-safe, 상위 시스템이 오래 접속하지 않으면 오래된 이벤트부터 유실됨).
+한 번의 History 요청에 이벤트 1건만 실어 응답함(Data Block Index의 Current/End/Total을 전부 1로 표기) -
+여러 건을 한 응답에 몰아 보내는 것은 범위 밖으로 남겨둠.
+
+**응답 주소 처리 (단순화)**: TCP는 1:1 연결이라 IDTi 프로토콜이 원래 상정한 RS-485 다중 장치 버스 주소
+지정이 실질적 의미가 없다. 응답의 Destination Address는 요청의 Source Address(5byte)를 그대로 앞
+5byte에 옮기고 나머지 3byte(Device 확장 비트마스크)는 0으로 채우며, Source Address는 문서상 고정값
+(Host/ComSlot/Controller/Module/Device 전부 `0x01`)을 그대로 사용함.
+
+**설계 결정: 카드 폴링 주기와 네트워크 처리 분리**: 처음에는 기존 `sleep(2)` 자리를 그냥 `net_poll(net, 2000)`
+으로 바꿨는데, `select()`가 상위 시스템 요청이 들어올 때마다 즉시 반환하는 바람에 요청이 몰리면
+`hal_read_card()`가 지연 없이 계속 호출되어 카드 폴링 주기가 무너지고 이벤트 큐가 순식간에 가득 차는
+문제를 테스트 중 발견함. `CLOCK_MONOTONIC` 기준으로 다음 카드 조회 시각을 별도로 관리하고, `net_poll()`의
+timeout을 "다음 카드 조회까지 남은 시간"으로 넘기는 방식으로 고쳐 두 주기를 분리함 - 네트워크 트래픽과
+무관하게 카드 조회는 항상 2초 주기를 유지함.
+
+**검증 방법**: 파이썬으로 실제 IDTi V2 요청 패킷(Header Checksum 포함)을 직접 만들어 보내는 테스트
+클라이언트로 확인함
+- Req Data(`0x06`)/Read(`0x02`)/History(`0x01`) 요청 → 응답이 `Header(44)+DeviceStatus(234)+Data(36)+Tail(2)
+  = 316byte`(문서에 명시된 크기와 정확히 일치)로 오고, Event Code/Door Status/Access ID/BCD 시각이 모두
+  올바르게 디코딩됨을 확인
+- 큐가 빈 상태에서 요청하면 `Header(44)+DeviceStatus(234)+Tail(2) = 280byte`(Event Log 없는 경우의 문서
+  크기와 일치), Data Block Total = 0으로 응답함을 확인
+- 빠르게 연속 요청을 보내는 동안에도 `acud` 로그의 카드 판정 타임스탬프가 여전히 2초 간격을 유지함을 확인
+  (위 "카드 폴링 주기 분리" 버그가 고쳐졌는지 검증)
+- `kill -HUP`으로 `config.json`의 `tcp_port`를 9870→9871로 바꾸면 기존 포트(9870)는 연결이 거부되고 새
+  포트(9871)로만 접속되며, `door_open_seconds`도 함께 재시작 없이 반영됨을 확인
+- 잘못된 Header Checksum을 가진 패킷을 보내면 수신 버퍼를 초기화하고 연결은 끊지 않음을 확인
 
 ## 빌드 & 실행
 

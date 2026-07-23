@@ -29,7 +29,12 @@ ACUD_DIR = os.environ.get(
 CONFIG_PATH = os.path.join(ACUD_DIR, "config.json")
 PID_PATH = os.path.join(ACUD_DIR, "acud.pid")
 
-DEFAULT_CONFIG = {"db_path": "acud.db", "door_open_seconds": 3, "admin_password": "0000"}
+DEFAULT_CONFIG = {
+    "db_path": "acud.db",
+    "door_open_seconds": 3,
+    "admin_password": "0000",
+    "tcp_port": 9870,  # IDTi 프로토콜 V2 TCP 서버 포트 (5단계). 웹 화면 편집은 아직 미지원
+}
 
 DOOR_OPEN_SECONDS_MIN = 1
 DOOR_OPEN_SECONDS_MAX = 99  # IDTi Device Output(Relay) ActiveTime 범위와 동일

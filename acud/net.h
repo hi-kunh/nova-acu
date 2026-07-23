@@ -1,0 +1,37 @@
+#ifndef ACU_NET_H
+#define ACU_NET_H
+
+#include "access.h"
+
+/*
+ * 네트워크 통신부 (5단계, IDTi 프로토콜 V2, TCP 전용).
+ * 상위 시스템(PC)이 접속해 Event Log(History, Object 0x01)를 요청하면
+ * 출입 판정 결과를 IDTi Event Structure(36byte)로 응답한다.
+ */
+
+typedef struct AcuNet AcuNet;
+
+/* TCP 서버를 초기화한다 (지정한 port로 listen). 실패 시 NULL (네트워크 없이도 출입 판정은 계속 동작해야 함). */
+AcuNet *net_init(int port);
+
+/* 네트워크 자원을 정리한다. net이 NULL이어도 안전. */
+void net_shutdown(AcuNet *net);
+
+/*
+ * 접속/수신/응답을 최대 timeout_ms 동안 처리한다 (select 기반, non-blocking).
+ * main 루프에서 sleep() 대신 주기적으로 호출한다. net이 NULL이면 아무 일도 하지 않는다.
+ */
+void net_poll(AcuNet *net, int timeout_ms);
+
+/*
+ * 출입 판정 결과를 IDTi Event Log(History, Object 0x01)로 상위 시스템에 보고할 큐에 넣는다.
+ * id_hex: 허용 시 User ID, 거부 시 Card ID (IDTi Event Structure의 Access ID 규칙과 동일), 16자 hex 문자열.
+ * door_status: IDTI_DOOR_STATUS_* 값 (판정 시점의 문 상태).
+ * DB 오류(ACCESS_DENIED_DB_ERROR)는 상위 시스템에 보고할 실질적 의미가 없어 무시한다.
+ */
+void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status);
+
+/* 현재 도어 센서 상태를 갱신한다 (Device Status 응답에 사용, IDTI_DOOR_STATUS_* 값) */
+void net_set_door_status(AcuNet *net, int door_status);
+
+#endif /* ACU_NET_H */
