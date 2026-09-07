@@ -38,12 +38,12 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 - [x] ~~baud/프레이밍~~ → **115200 8N1** (확정)
 - [x] ~~물리 계층~~ → **USB 확정** (IO 보드 J18 = 2.54mm 10핀 내부 USB 헤더 사용).
       UART의 핀먹스/콘솔 충돌 문제가 전부 사라짐. UART 조사 기록은 HARDWARE.md에 참고용으로 보존
-- [x] ~~RRU MCU 선정~~ → **STM32F103RB / NUCLEO-F103RB** 개발보드로 시작
-  - 브링업은 **ST-LINK VCP를 링크로 사용**(`/dev/ttyACM*`, 배선 0). 나중에 네이티브 USB로 이전해도
-    ACU 코드는 동일. 보드에 타깃 MCU용 USB 커넥터가 없고 D+ 1.5k 외부 풀업이 필요하기 때문
-  - F103은 USB/CAN 동시 사용 불가(512B SRAM 공유)지만 RK3566=USB / RK3568=CAN으로 한 번에 하나만
-    쓰므로 무관
-- [ ] **최종 RRU 보드 I/O 설계** — LQFP64 + EXTI 16개로는 48 I/O(Wiegand16+입력24+출력8) 불가.
+- [x] ~~RRU MCU 선정~~ → **STM32C562RE / NUCLEO-C562RE** 개발보드로 시작
+  - 보드에 네이티브 USB Type-C Device 커넥터 내장 → CDC-ACM, `/dev/ttyACM0`. 브릿지 IC 불필요
+  - ST-LINK VCP가 별도 채널로 남아 RRU 디버그 로그를 프로토콜 링크와 분리 가능
+  - CAN FD 커넥터(CN18)도 있어 나중 RK3568+CAN 경로를 같은 보드에서 검증 가능
+  - 주의: USB-C로 보드 급전 불가(self-powered 전제) → VBUS/GND 처리 정할 것
+- [ ] **최종 RRU 보드 I/O 설계** — LQFP64로는 48 I/O(Wiegand16+입력24+출력8)가 한계 초과.
       Wiegand D0/D1 다이오드 OR, 입출력 익스팬더, 상위 패키지 등 검토
 - [ ] 개발보드 단계는 **리더 1~2채널만 붙여 프로토콜 검증** (8채널은 실보드에서)
 - [ ] J18 결선 정의 — 4포트 중 사용 포트, VBUS 연결 여부, GND 처리
