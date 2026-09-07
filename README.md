@@ -14,7 +14,8 @@
 - **[3단계] config.json 감시 + 무중단 리로드**  완료 (아래 "3단계 완료 기록" 참고)
 - **[4단계] 웹 설정 인터페이스 (Flask)**  완료, 1차 범위(config.json 편집)만 (아래 "4단계 완료 기록" 참고)
 - **[5단계] 네트워크 통신부 (TCP, IDTi 프로토콜 V2)**  완료, 1차 범위(Event Log 조회 응답)만 (아래 "5단계 완료 기록" 참고)
-- 6단계: 실제 하드웨어 (GPIO / Wiegand : rk3566 시리얼 통신, rk3568 can bus)
+- **[6단계] 실제 하드웨어** - 착수 예정. RK3566(ACU) ↔ UART ↔ RRU 보드 (아래 "시스템 구성" 참고)
+  - RK3568 + CAN 경로는 이번 범위에서 제외 (보드 확보 후 별도 진행)
 
 ## 대상 하드웨어
 
@@ -22,6 +23,18 @@
 - 신규 목표: RK3566 또는 RK3568
 - **현재 보유 보드**: RK3566 기반 **Radxa CM3 IO Board**
 - 최종적으로 기존 제품과 100% 동일한 IDTi 프로토콜로 통신 가능하게 만드는 것이 목표 (기존 상위 시스템/웹앱과 호환)
+
+## 시스템 구성
+
+```
+[상위 시스템] --TCP/IDTi V2--> [ACU: RK3566] --UART--> [RRU: 리더8 / 입력24 / 출력8]
+```
+
+리더기·센서·릴레이는 ACU에 직접 연결되지 않고 별도의 **RRU 보드**가 담당한다.
+ACU는 UART로 RRU와만 통신하므로, 6단계는 "RK3566에서 Wiegand를 직접 받는 일"이 아니라
+**"ACU-RRU 간 UART 프로토콜을 설계·구현하는 일"** 이다.
+
+> 보드 사양, 채널 구성표, IDTi 매핑, 미확정 사항은 **[HARDWARE.md](HARDWARE.md)** 에 별도로 정리.
 
 ## 참고 프로토콜 문서 (기존 장치 통신 규격)
 
@@ -83,9 +96,10 @@ Tail 필드: `Packet CheckBytes(0/2, XOR+SUM) Packet Checksum(1, 고정) ETX(1, 
 ### Relay & Sensor 요약 (`9.` 문서)
 
 - **Device Output(Relay)**: Object `0x2D`, 채널 Index 1~254. 구조체 핵심 필드: `IsEnabled`, `ActiveType`(1=Door, 2=Alarm, 3=LockDown, 4=Continuous, 5=Time_Relay, 6=Fail Relay, 7=Door Status Relay, 8=Solenoid Relay), `ActiveTime`(1~99초)
-  - 우리 단일 도어 장치는 **Door Relay(ActiveType=1)** 만 사용: 인증 성공 시 `ActiveTime`초 동안 릴레이 동작
+  - 우리 장치는 **Door Relay(ActiveType=1)** 만 사용: 인증 성공 시 `ActiveTime`초 동안 릴레이 동작
+    (구성 변경으로 도어 8개 -> 릴레이 8채널. 채널별 NO/NC 선택은 [HARDWARE.md](HARDWARE.md) 참고)
 - **Device Input(Sensor)**: Object `0x2C`, 채널 Index 1~254. 구조체 핵심 필드: `Use`(Exit/Alarm/Lock/Door/Intrusion/NoAction), `ActiveType`(0=Normal Close, 1=Normal Open)
-  - 우리 장치는 최소한 `Door Contact`(문 접점), `Exit Button`(비상/퇴실 버튼) 두 센서만 우선 반영
+  - 구성 확정 후: 도어당 `Exit Button`/`Door Contact`/`Lock State` 3종 x 8도어 = 24채널 (HARDWARE.md 참고)
 
 ## 1단계 완료 기록 (SQLite3 + 출입 판정 로직)
 

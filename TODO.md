@@ -3,7 +3,7 @@
 ACU 프로젝트의 진행 상황과 남은 일 정리.
 완료된 단계의 **상세 기록은 [README.md](README.md)** 에 있고, 이 파일은 "무엇이 남았는지"만 관리한다.
 
-- 최종 갱신: 2026-09-04
+- 최종 갱신: 2026-09-07
 - 현재 위치: **5단계 완료 / 6단계 착수 예정**
 
 ---
@@ -18,28 +18,61 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 | 3 | config.json 감시 + 무중단 리로드(SIGHUP) | ✅ 완료 |
 | 4 | 웹 설정 인터페이스 (Flask) | 🔶 1차 범위만 (config 편집) |
 | 5 | 네트워크 통신부 (TCP, IDTi 프로토콜 V2) | 🔶 1차 범위만 (Event Log 응답) |
-| 6 | 실제 하드웨어 (GPIO / Wiegand / CAN) | ⬜ 다음 작업 |
+| 6 | 실제 하드웨어 (UART, ACU↔RRU) | ⬜ 다음 작업 |
 | 7+ | 배포/운영 (systemd, 보안 강화 등) | ⬜ 미착수 |
 
 범례: ✅ 완료 · 🔶 부분 완료(남은 항목 아래 참고) · ⬜ 미착수
 
 ---
 
-## 다음 작업: 6단계 — 실제 하드웨어 연동
+## 다음 작업: 6단계 — RRU 연동 (UART)
 
-`hal_mock.c`를 실제 구현체로 교체하는 단계. `hal.h` 인터페이스는 2단계에서 확정해 두었으므로
-`main.c` / `access.c` 는 건드리지 않는 것이 목표.
+하드웨어 구성이 확정되면서 6단계 내용이 바뀌었다. **RK3566에서 Wiegand를 직접 받는 것이 아니라,
+별도 RRU 보드(리더8 / 입력24 / 출력8)와 UART로 통신**한다. 구성 상세는 [HARDWARE.md](HARDWARE.md).
 
-- [ ] Radxa CM3 IO Board(RK3566) 핀맵 확인 — 리더기 D0/D1, 도어 릴레이, 도어 접점, 퇴실 버튼에 쓸 핀 결정
-- [ ] `hal_rk3566.c` 작성 — Wiegand 26/34bit 수신 (시리얼 통신)
-  - [ ] D0/D1 falling edge 인터럽트 수신 (gpiod 또는 sysfs 방식 결정 필요)
-  - [ ] 비트 타임아웃 처리 + 패리티 검증 → 카드 ID 변환
-  - [ ] `hal_read_card()` 를 폴링 방식 그대로 유지할지, 이벤트 큐 방식으로 바꿀지 결정
-- [ ] 도어 릴레이 출력 GPIO 제어 — `hal_open_door(seconds)` 구현 (블로킹 회피: 별도 스레드 또는 만료 시각 관리)
-- [ ] 센서 입력 GPIO 읽기 — `hal_read_sensor()` (Door Contact / Exit Button, Normal Open/Close 설정 반영)
-- [ ] RK3568 CAN bus 경로 검토 (보드 확보 후) — `hal_rk3568.c`
-- [ ] Makefile에 HAL 구현체 선택 스위치 추가 (`HAL=mock|rk3566|rk3568`)
-- [ ] 실제 카드로 판정 → 릴레이 동작까지 엔드투엔드 확인
+### 6-0. 설계 확정 (코드 작성 전)
+
+- [ ] RRU 대수 확정 (1대 고정 vs UART 멀티드롭 다수) → 프로토콜에 장치 주소 필드 필요 여부 결정
+- [ ] UART 물리 규격 확정 (RS-232/RS-485, baud, 프레이밍) + RK3566에서 쓸 포트·디바이스 노드
+- [ ] **ACU↔RRU 프로토콜 설계** — 프레임 구조, CRC, 카드 이벤트 통지 방식(ACU 폴링 vs RRU 능동 송신),
+      릴레이 제어 명령, 센서 상태 조회, 타임아웃·재전송, 연결 끊김 감지
+- [ ] Wiegand 카드 ID 형식(26/34bit) → DB `card_id`(hex 16자) 매핑 규칙 확정
+- [ ] 채널 번호 체계를 RRU 펌웨어와 일치시키기 (HARDWARE.md 표는 제안값)
+
+### 6-1. 기존 코드의 단일 도어 전제 걷어내기
+
+1~5단계는 **단일 도어/단일 리더**를 전제로 만들어져 있어 8도어 구성과 어긋난다.
+
+- [ ] **`hal.h` 인터페이스에 채널 차원 추가** — `hal_read_card()`/`hal_open_door()`/`hal_read_sensor()`
+      모두 "어느 리더/도어인지" 인자가 없음. 2단계에 "main.c/access.c는 안 건드린다"고 적었지만
+      이 부분은 예외로 수정 불가피
+- [ ] **`net.c:212` Reader Address 하드코딩 해제** — 현재 `0x00` 고정("단일 리더 → 0"), 실제 리더 번호로 교체
+- [ ] **DB 스키마에 도어별 출입 권한 추가** — 현재 `cards`는 카드의 허용/거부만 판정할 뿐
+      "8개 도어 중 어디를 열 수 있는가"를 표현 못 함. IDTi Group / User General Group 개념
+      (미확인 문서 `10.`, `11.`) 확인 후 스키마 확장
+- [ ] **`main.c` 루프를 8리더 처리로 확장** — 현재는 카드 1건씩 순차 판정
+- [ ] `CARD_POLL_INTERVAL_MS`(현재 2000ms) 재검토 — 카드 태그를 놓치지 않을 주기로 조정
+- [ ] `hal_open_door()` 논블로킹화 — 현재 mock은 로그만 찍어 드러나지 않지만, 실제로 N초 블로킹하면
+      그동안 TCP 응답과 카드 조회가 멈춤 (만료 시각을 메인 루프에서 확인하는 방식 검토)
+- [ ] Device Status `ExistedModule`/`IOModuleStatus` 재검토 — 현재 전부 0. RRU가 IDTi Remote Module
+      위치에 해당하므로 보고 필요한지 확인 (문서 `8. System Device Reader Setup`)
+
+### 6-2. 구현
+
+- [ ] `acud/rru.c` / `rru.h` — UART 열기/닫기, 프레임 송수신, CRC, 재전송 (전송 계층을 분리해
+      나중에 RK3568 CAN으로 갈아끼울 수 있게)
+- [ ] `acud/hal_rru.c` — 위 프로토콜을 `hal.h` 인터페이스로 감싼 실제 구현체
+- [ ] Makefile HAL 구현체 선택 스위치 (`HAL=mock|rru`)
+- [ ] config.json에 UART 설정 추가 (포트 경로, baud, RRU 주소) + 웹 UI 반영
+- [ ] 출력 채널 NO/NC 설정 항목 노출
+
+### 6-3. 검증
+
+- [ ] RRU 없이 동작 확인 — UART 열기 실패해도 데몬이 죽지 않을 것(기존 net_init fail-safe와 동일 원칙)
+- [ ] 실제 카드 태그 → 판정 → 해당 도어 릴레이 동작 엔드투엔드
+- [ ] 8리더 각각 구분되어 판정되고, 이벤트의 Reader Address가 올바른지
+- [ ] Exit 버튼 입력 → 판정 없이 릴레이 동작
+- [ ] Door/Lock 센서 상태가 이벤트 Door Status에 반영되는지
 - [ ] README에 6단계 완료 기록 추가
 
 ---
@@ -83,7 +116,6 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 
 ## 기술 부채 / 확인 필요
 
-- [ ] `hal_read_card()` 폴링 주기 2초가 실제 리더기에 맞는지 재검토 (6단계에서 결정)
 - [ ] `protocol.c` 유닛 테스트 없음 — 소켓과 분리해 뒀으니 테스트 붙이기 좋음
 - [ ] 참고 문서 중 아직 안 읽은 것: `3. Member(User DB) Structure`, `6. FileBinaryTransmit`,
       `8. System Device Reader Setup`, `10. Group`, `11. User General Group`, `13. Force OpenMode`,
