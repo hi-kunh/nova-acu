@@ -62,6 +62,9 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 - [ ] 빌드 방식 결정 — 보드에서 네이티브 빌드(권장) vs 개발 PC 크로스 컴파일
 - [ ] 보드에 의존성 설치 (`build-essential libsqlite3-dev libcjson-dev python3-venv`)
 - [ ] **보드 네트워크** — 고정 IP(또는 DHCP 예약), PC에서 포트 도달 확인
+  - 현재 상태(2026-09-08): **wlan0 = 192.168.0.132 (UP), eth0 = DOWN**.
+    개발 PC(192.168.0.73)와 **같은 대역이라 지금 바로 통신 테스트가 가능**하다
+  - **제품은 이더넷을 쓸 것이므로 eth0을 살려야 한다** (케이블 연결 확인)
 - [ ] **시간 동기화** — NTP 또는 RTC. IDTi 이벤트는 BCD 시각을 싣기 때문에 시각이 틀리면 이벤트가 무의미.
       타임존(KST) 설정도 함께
 - [ ] **경로 절대화** — 현재 `config.json`/`acud.db`/`acud.pid`/`acud_mock.fifo`를 전부 cwd 상대경로로 씀.
@@ -131,16 +134,38 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
       **네트워크도 살아 있을 가능성이 높다** -> apt 실패는 저장소 문제로 좁혀짐
 - [ ] **타임존을 Asia/Seoul로 변경** — 현재 **UTC**다. acud는 `localtime_r`로 이벤트 시각(BCD)을 만들기
       때문에 이대로 두면 PC에 9시간 어긋난 시각이 올라간다. `sudo timedatectl set-timezone Asia/Seoul`
-- [ ] **`apt update` 실패 원인 확정** — 시각/네트워크는 배제됐다. 남은 것:
-  1. **저장소 만료 (유력)** — Bullseye는 2026년 8월로 LTS가 끝나 미러가 `archive.debian.org`로 옮겨졌다.
-     404가 나면 `sources.list`를 아래로 교체:
-     ```
-     deb http://archive.debian.org/debian bullseye main contrib non-free
-     deb http://archive.debian.org/debian-security bullseye-security main contrib non-free
-     ```
-     archive의 Release 파일은 만료 상태라 `Acquire::Check-Valid-Until "false";`도 필요할 수 있다
-  2. **Radxa 저장소** — `/etc/apt/sources.list.d/`의 radxa/rockchip 항목이 죽었으면 주석 처리
-- [ ] **apt가 끝내 안 되면 우회** — 데몬이 필요한 건 헤더 2개(`sqlite3.h`, `cJSON.h`)뿐이다.
+- [x] ~~`apt update` 실패 원인 확정~~ -> **원인 2개 확정 (2026-09-08, 저장소를 직접 조회해 확인)**
+
+  | 저장소 | 상태 | 문제 |
+  |--------|------|------|
+  | `bullseye` main | 정상 (Valid-Until 없음) | — |
+  | `bullseye-updates` | 정상 (Valid-Until 없음) | — |
+  | **`bullseye-security`** | **Release 만료** | `Valid-Until: 2026-09-07 21:13 UTC` — **어제 만료**. Bullseye LTS가 2026-08-31로 끝나 더 갱신되지 않는다. apt는 만료된 Release를 거부한다 |
+  | **`bullseye-backports`** | **404** | 아카이브에서 제거됨 |
+  | radxa / radxa-rockchip | 정상 (200) | — |
+
+  -> **`deb.debian.org`는 아직 bullseye를 서비스하고 있다.** archive.debian.org로 옮길 필요 없음
+     (오히려 archive에는 `debian-security/bullseye-security`가 없다)
+
+  **조치**:
+  ```bash
+  # 1) 사라진 backports 비활성화
+  sudo mv /etc/apt/sources.list.d/bullseye-backports.list \
+          /etc/apt/sources.list.d/bullseye-backports.list.disabled
+
+  # 2) 만료된 Release를 받아들이도록 설정 (security 저장소를 살려 두기 위함)
+  echo 'Acquire::Check-Valid-Until "false";' \
+      | sudo tee /etc/apt/apt.conf.d/99no-check-valid-until
+
+  sudo apt update
+  sudo apt install -y build-essential libsqlite3-dev libcjson-dev python3-venv
+  ```
+  - `Check-Valid-Until`을 끄면 롤백 공격 방어가 약해지지만, EOL 배포판에서는 통상적인 처리다.
+    security 저장소를 아예 비활성화하는 선택지도 있으나 그러면 **이미 나와 있는 보안 수정분까지 못 받는다**
+  - 필요한 패키지는 bullseye main(arm64)에 다 있다:
+    `libsqlite3-dev 3.34.1-3`, `libcjson-dev 1.7.14-1+deb11u1`
+- [ ] (예비) **apt가 끝내 안 되면 우회** — 데몬이 필요한 건 헤더 2개(`sqlite3.h`, `cJSON.h`)뿐이다.
+      보드에는 이미 `libsqlite3.so.0`이 있고 gcc/make/git/python3(3.9.2)/venv/pip3도 깔려 있다.
       (a) arm64 `.deb`를 개발 PC에서 받아 `dpkg -i`, (b) 소스를 저장소에 vendoring,
       (c) 개발 PC에서 크로스 빌드해 바이너리만 복사. **apt가 죽어도 pip(PyPI)는 될 수 있으니
       웹UI는 별개로 판단할 것**
