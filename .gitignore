@@ -8,6 +8,9 @@ build/
 *.sqlite3
 *.pid
 
+# HAL mock 카드 주입용 FIFO (실행 시 생성됨)
+acud/acud_mock.fifo
+
 # Python venv (웹 설정 인터페이스)
 webui/.venv/
 __pycache__/

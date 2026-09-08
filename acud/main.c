@@ -81,6 +81,14 @@ int main(void)
     sa_reload.sa_handler = on_reload;
     sigaction(SIGHUP, &sa_reload, NULL);
 
+    /*
+     * SIGPIPE 무시: 상위 시스템이 연결을 끊은 직후 응답을 보내면 기본 동작이 프로세스 종료다.
+     * 데몬이 통째로 죽으면 안 되므로 무시하고, send() 실패는 net.c에서 errno로 처리한다.
+     */
+    struct sigaction sa_ignore = {0};
+    sa_ignore.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sa_ignore, NULL);
+
     log_msg("ACU 데몬 시작");
 
     FILE *pidf = fopen(PID_PATH, "w");

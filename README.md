@@ -14,6 +14,8 @@
 - **[3단계] config.json 감시 + 무중단 리로드**  완료 (아래 "3단계 완료 기록" 참고)
 - **[4단계] 웹 설정 인터페이스 (Flask)**  완료, 1차 범위(config.json 편집)만 (아래 "4단계 완료 기록" 참고)
 - **[5단계] 네트워크 통신부 (TCP, IDTi 프로토콜 V2)**  완료, 1차 범위(Event Log 조회 응답)만 (아래 "5단계 완료 기록" 참고)
+- **[5.5단계] ACU 단독 개통 (CM3 보드 + PC 통신)** - 진행 중. RRU 개발보드를 기다리는 동안
+  acud를 실제 CM3 IO 보드에 올리고 상위 시스템 PC와 TCP 통신을 개통한다 (아래 "5.5단계 진행 기록" 참고)
 - **[6단계] 실제 하드웨어** - 착수 예정. RK3566(ACU) ↔ USB ↔ RRU 보드 (아래 "시스템 구성" 참고)
   - RRU MCU는 **STM32C562** 확정. 외부 인터럽트는 Wiegand 16입력(리더 8 x D0/D1)에 **충분함 확인**
   - **개발 순서 확정**: NUCLEO-C562RE 개발보드 구매 → **8모듈 중 2모듈만 구현해 검증** →
@@ -251,6 +253,65 @@ timeout을 "다음 카드 조회까지 남은 시간"으로 넘기는 방식으�
 - `kill -HUP`으로 `config.json`의 `tcp_port`를 9870→9871로 바꾸면 기존 포트(9870)는 연결이 거부되고 새
   포트(9871)로만 접속되며, `door_open_seconds`도 함께 재시작 없이 반영됨을 확인
 - 잘못된 Header Checksum을 가진 패킷을 보내면 수신 버퍼를 초기화하고 연결은 끊지 않음을 확인
+
+## 5.5단계 진행 기록 (ACU 단독 개통: CM3 보드 + PC 통신)
+
+RRU 개발보드가 오기 전까지, **acud를 실제 CM3 IO 보드에서 돌리고 상위 시스템 PC와 통신을 개통**하는 작업.
+남은 항목은 [TODO.md](TODO.md)의 "5.5단계" 절에서 관리한다.
+
+### 확정 사실 - 연결 방향과 상대 프로그램 (2026-09-08)
+
+기존 PC 프로그램 소스가 로컬(`/home/jayden/workspace/idti/`)에 있어 직접 확인함.
+
+- 상위 시스템은 **IntelliScan NET Platinum**이고, `clsAsynchronousClient.cs`에서 `Socket.BeginConnect`로
+  **장치에 접속해 오는 TCP 클라이언트**다. 즉 **ACU가 listen 하는 서버가 맞다** (현재 구조 유지)
+- Platinum의 기본 포트는 **1004** (`clsAsynchronousClient.cs:35`). acud 기본값 9870과 다르므로 맞춰야 함
+- 프레임/이벤트 구조는 `IntelliScan Device SDK Project/Source/isldev/`의 `clsDevFrame.cs`,
+  `clsDevFrameAck.cs`, `clsDevEventInfo.cs`, `clsDevCommand.cs`에 실제 구현이 있다.
+  **문서에서 애매한 부분(ACK 처리, 요청 순서, 필드 고정값)은 이 소스가 정답**
+
+### 통신 안정성 수정 (2026-09-08 완료)
+
+**1. SIGPIPE로 데몬이 통째로 죽던 문제** — `main.c`에 SIGPIPE 무시를 넣고 `net.c`의 send에 `MSG_NOSIGNAL`을
+지정. 상위 시스템이 응답을 읽지 않고 연결을 끊으면, 그 소켓에 다음 응답을 쓰는 순간 기본 동작(프로세스 종료)이
+걸린다. 수정 전 바이너리로 재현 확인 — 응답을 안 읽고 끊는 클라이언트 **3번째 연결에서 프로세스가 죽음**.
+수정 후 같은 테스트를 10회 반복해도 생존하고 카드 판정도 계속 동작함.
+
+**2. 부분 전송(partial send) 처리** — `AcuNet`에 4KB 송신 버퍼를 두고, `send()`가 일부만 보내면 나머지를
+남겨 `select()`의 writefds로 이어 보낸다. 기존에는 반환값을 무시해 응답이 조용히 잘릴 수 있었다.
+함께 고친 것: **전송에 성공한 뒤에 이벤트를 큐에서 제거**하도록 순서를 바꿔, 전송 실패 시 이벤트가
+유실되지 않고 다음 요청 때 다시 나가게 함.
+
+**3. mock HAL을 주입식으로 변경** — 기존 `hal_mock.c`는 `hal_read_card()`가 불릴 때마다(2초 주기) 무조건
+카드가 태그된 것처럼 굴어서, PC 통신을 테스트하는 동안 이벤트 큐(32개)가 1분 남짓이면 가득 찼다.
+이제 기본은 "아무 일도 없음"이고 FIFO(`acud_mock.fifo`)로 원할 때 주입한다.
+
+```bash
+echo 04A1B2C3D4E5F600 > acud/acud_mock.fifo   # 카드 1회 태그 (짧게 넣으면 뒤를 0으로 채움)
+echo "door open"      > acud/acud_mock.fifo   # 도어 접점 = 열림 (이벤트의 Door Status에 반영)
+echo "door closed"    > acud/acud_mock.fifo
+echo "exit on"        > acud/acud_mock.fifo   # Exit 버튼 (main 루프는 아직 미처리)
+echo "auto on"        > acud/acud_mock.fifo   # 예전처럼 2초마다 더미 카드 순회
+echo "list"           > acud/acud_mock.fifo   # 더미 카드 목록을 로그로 출력
+```
+
+FIFO는 `O_RDWR`로 연다 — 읽기 전용으로 열면 쓰는 쪽이 없을 때 read가 계속 EOF를 돌려주기 때문.
+여러 줄을 한 번에 넣어도 되도록 카드는 대기 큐(16개)에 쌓아 두고 조회 때마다 한 장씩 꺼낸다.
+
+**4. 테스트 클라이언트를 저장소에 포함** — `tools/idti_client.py`. PC(Platinum)와 같은 역할, 즉 **접속하는
+쪽**이다. 5단계 검증 때 쓴 스크립트가 커밋되어 있지 않아 보드에서 다시 검증하려면 매번 새로 만들어야 했다.
+
+```bash
+python3 tools/idti_client.py                          # 로컬 1회 조회
+python3 tools/idti_client.py --host 192.168.0.50      # 보드에 붙여 조회
+python3 tools/idti_client.py --watch --interval 2     # 상위 시스템의 폴링 흉내
+python3 tools/idti_client.py --request status         # Device Status 요청 (아직 무응답인 것 확인용)
+python3 tools/idti_client.py --raw                    # 주고받은 바이트 그대로 출력
+```
+
+**검증 결과**: 이벤트 없을 때 280byte / 이벤트 있을 때 316byte 응답, Event Code·Door Status·Access ID·
+BCD 시각 정상 디코딩, 카드 주입 순서대로 이벤트가 하나씩 빠져나감, `door open` 주입이 다음 이벤트의
+Door Status에 반영됨을 확인.
 
 ## 빌드 & 실행
 

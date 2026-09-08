@@ -17,6 +17,7 @@
 #include <netinet/in.h>
 
 #define NET_RECV_BUF_CAP 512
+#define NET_SEND_BUF_CAP 4096 /* 응답 1건(316byte)보다 넉넉히. 부분 전송분을 담아 둔다 */
 #define NET_EVENT_QUEUE_CAP 32
 
 typedef struct {
@@ -33,6 +34,11 @@ struct AcuNet {
     uint8_t recv_buf[NET_RECV_BUF_CAP];
     size_t  recv_len;
 
+    /* 송신 대기 버퍼: 논블로킹 소켓이라 send()가 일부만 보내고 반환할 수 있다 */
+    uint8_t send_buf[NET_SEND_BUF_CAP];
+    size_t  send_len; /* 버퍼에 쌓인 총 바이트 */
+    size_t  send_off; /* 그중 이미 보낸 바이트 */
+
     int door_status; /* IDTI_DOOR_STATUS_*, Device Status 응답에 반영 */
 
     NetEvent queue[NET_EVENT_QUEUE_CAP];
@@ -47,6 +53,85 @@ static void set_nonblocking(int fd)
     {
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
+}
+
+/* 연결이 끊겼을 때 소켓과 송수신 버퍼를 함께 정리한다 */
+static void net_drop_client(AcuNet *net, const char *reason)
+{
+    if (net->client_fd >= 0)
+    {
+        close(net->client_fd);
+        net->client_fd = -1;
+    }
+    net->recv_len = 0;
+    net->send_len = 0;
+    net->send_off = 0;
+    if (reason)
+    {
+        log_msg(reason);
+    }
+}
+
+/*
+ * 송신 버퍼에 남은 바이트를 보낼 수 있는 만큼 보낸다.
+ * 논블로킹 소켓이므로 커널 송신 버퍼가 차면 EAGAIN으로 일부만 나갈 수 있다 -> 나머지는 남겨 두고
+ * 다음 net_poll()에서 쓰기 가능해질 때 이어 보낸다. SIGPIPE는 MSG_NOSIGNAL로 막는다.
+ */
+static void net_flush_send(AcuNet *net)
+{
+    while (net->client_fd >= 0 && net->send_off < net->send_len)
+    {
+        ssize_t n = send(net->client_fd, net->send_buf + net->send_off,
+                         net->send_len - net->send_off, MSG_NOSIGNAL);
+        if (n > 0)
+        {
+            net->send_off += (size_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+        {
+            return; /* 지금은 더 못 보냄. 남은 만큼 다음 기회에 이어 보낸다 */
+        }
+        net_drop_client(net, "네트워크: 전송 실패 -> 연결 종료 (상위 시스템이 먼저 끊은 것으로 보임)");
+        return;
+    }
+
+    if (net->send_off >= net->send_len)
+    {
+        net->send_len = 0;
+        net->send_off = 0;
+    }
+}
+
+/*
+ * 응답을 송신 버퍼에 넣고 곧바로 보낼 수 있는 만큼 보낸다.
+ * 반환: 0=성공(전부 보냈거나 버퍼에 남김), -1=버퍼가 부족해 보내지 못함.
+ */
+static int net_queue_send(AcuNet *net, const uint8_t *data, size_t len)
+{
+    if (net->client_fd < 0)
+    {
+        return -1;
+    }
+
+    /* 이미 보낸 앞부분을 걷어내 남은 공간을 확보한다 */
+    if (net->send_off > 0)
+    {
+        memmove(net->send_buf, net->send_buf + net->send_off, net->send_len - net->send_off);
+        net->send_len -= net->send_off;
+        net->send_off = 0;
+    }
+
+    if (net->send_len + len > NET_SEND_BUF_CAP)
+    {
+        log_msg("네트워크: 송신 버퍼가 가득 차 응답을 보내지 못함");
+        return -1;
+    }
+
+    memcpy(net->send_buf + net->send_len, data, len);
+    net->send_len += len;
+    net_flush_send(net);
+    return 0;
 }
 
 AcuNet *net_init(int port)
@@ -247,15 +332,15 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr)
 
     uint16_t cur = 0, end = 0, total = 0, one_len = 0;
 
+    int event_attached = 0;
     if (net->queue_count > 0)
     {
+        /* 큐에서 꺼내는 것은 전송에 성공한 뒤에 한다 (전송이 실패하면 이벤트가 유실되므로) */
         build_event_info(payload + IDTI_DEVICE_STATUS_V2_LEN, &net->queue[net->queue_head]);
         payload_len += IDTI_EVENT_INFO_LEN;
         cur = 1; end = 1; total = 1;
         one_len = IDTI_EVENT_INFO_LEN;
-
-        net->queue_head = (net->queue_head + 1) % NET_EVENT_QUEUE_CAP;
-        net->queue_count--;
+        event_attached = 1;
     }
 
     /*
@@ -275,9 +360,23 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr)
                                hdr->start_item, hdr->end_item,
                                cur, end, total, one_len,
                                payload, payload_len);
-    if (n > 0 && net->client_fd >= 0)
+    if (n <= 0)
     {
-        send(net->client_fd, out, (size_t)n, 0);
+        log_msg("네트워크: 응답 패킷 생성 실패");
+        return;
+    }
+
+    if (net_queue_send(net, out, (size_t)n) == 0)
+    {
+        if (event_attached)
+        {
+            net->queue_head = (net->queue_head + 1) % NET_EVENT_QUEUE_CAP;
+            net->queue_count--;
+        }
+    }
+    else if (event_attached)
+    {
+        log_msg("네트워크: 응답을 보내지 못해 이벤트를 큐에 남겨 둠 (다음 요청 때 다시 전송)");
     }
 }
 
@@ -288,13 +387,18 @@ void net_poll(AcuNet *net, int timeout_ms)
         return;
     }
 
-    fd_set readfds;
+    fd_set readfds, writefds;
     FD_ZERO(&readfds);
+    FD_ZERO(&writefds);
     FD_SET(net->listen_fd, &readfds);
     int maxfd = net->listen_fd;
     if (net->client_fd >= 0)
     {
         FD_SET(net->client_fd, &readfds);
+        if (net->send_off < net->send_len)
+        {
+            FD_SET(net->client_fd, &writefds); /* 보내다 만 응답이 남아 있으면 쓰기 가능해질 때 이어 보낸다 */
+        }
         if (net->client_fd > maxfd)
         {
             maxfd = net->client_fd;
@@ -305,10 +409,15 @@ void net_poll(AcuNet *net, int timeout_ms)
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    int rc = select(maxfd + 1, &readfds, NULL, NULL, &tv);
+    int rc = select(maxfd + 1, &readfds, &writefds, NULL, &tv);
     if (rc <= 0)
     {
         return;
+    }
+
+    if (net->client_fd >= 0 && FD_ISSET(net->client_fd, &writefds))
+    {
+        net_flush_send(net);
     }
 
     if (FD_ISSET(net->listen_fd, &readfds))
@@ -318,12 +427,13 @@ void net_poll(AcuNet *net, int timeout_ms)
         {
             if (net->client_fd >= 0)
             {
-                close(net->client_fd);
-                log_msg("네트워크: 기존 연결을 새 연결로 교체함 (동시 1개 연결만 지원)");
+                net_drop_client(net, "네트워크: 기존 연결을 새 연결로 교체함 (동시 1개 연결만 지원)");
             }
             set_nonblocking(new_fd);
             net->client_fd = new_fd;
             net->recv_len = 0;
+            net->send_len = 0;
+            net->send_off = 0;
             log_msg("네트워크: 상위 시스템 연결됨");
         }
     }
@@ -338,10 +448,7 @@ void net_poll(AcuNet *net, int timeout_ms)
             {
                 return;
             }
-            close(net->client_fd);
-            net->client_fd = -1;
-            net->recv_len = 0;
-            log_msg("네트워크: 상위 시스템 연결 끊김");
+            net_drop_client(net, "네트워크: 상위 시스템 연결 끊김");
             return;
         }
         net->recv_len += (size_t)n;

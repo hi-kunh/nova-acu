@@ -4,8 +4,9 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 완료된 단계의 **상세 기록은 [README.md](README.md)** 에 있고, 이 파일은 "무엇이 남았는지"만 관리한다.
 
 - 최종 갱신: 2026-09-08
-- 현재 위치: **5단계 완료 / 6단계 설계 확정 중** — 하드웨어 구성·링크·MCU·인터럽트 확정.
-  **다음: NUCLEO-C562RE 개발보드 구매 -> 2모듈 구성으로 검증**, 프로토콜 설계 남음
+- 현재 위치: **5단계 완료 / 5.5단계(ACU 단독 개통) 진행 중** — RRU 개발보드가 오기 전까지
+  **CM3 IO 보드에 acud를 올리고 PC(상위 시스템)와 TCP 통신을 개통**하는 것이 당면 작업.
+  6단계(RRU 연동)는 하드웨어 확정 완료, 개발보드 구매 대기
 
 ---
 
@@ -19,14 +20,82 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 | 3 | config.json 감시 + 무중단 리로드(SIGHUP) | ✅ 완료 |
 | 4 | 웹 설정 인터페이스 (Flask) | 🔶 1차 범위만 (config 편집) |
 | 5 | 네트워크 통신부 (TCP, IDTi 프로토콜 V2) | 🔶 1차 범위만 (Event Log 응답) |
-| 6 | 실제 하드웨어 (USB, ACU↔RRU) | ⬜ 다음 작업 |
+| 5.5 | **ACU 단독 개통 (CM3 보드 + PC 통신)** | 🔶 진행 중 (아래 전용 절) |
+| 6 | 실제 하드웨어 (USB, ACU↔RRU) | ⬜ 개발보드 대기 |
 | 7+ | 배포/운영 (systemd, 보안 강화 등) | ⬜ 미착수 |
 
 범례: ✅ 완료 · 🔶 부분 완료(남은 항목 아래 참고) · ⬜ 미착수
 
 ---
 
-## 다음 작업: 6단계 — RRU 연동 (USB)
+## 진행 중: 5.5단계 — ACU 단독 개통 (CM3 IO 보드 + PC 통신)
+
+RRU 개발보드가 도착하기 전까지 할 수 있는 일. **acud를 실제 CM3 IO 보드에서 돌리고, PC(상위 시스템)와
+TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 대체한다.
+
+**확정된 전제 (2026-09-08)**
+
+- 연결 방향: **PC가 TCP 클라이언트로 ACU에 접속해 온다.** ACU는 지금처럼 listen 하는 서버가 맞음
+  (근거: `Platinum/Source/IntelliScan NET Platinum/clsAsynchronousClient.cs` — `BeginConnect`로 장치에 접속)
+- 상대 PC 프로그램: **IntelliScan NET Platinum** (기존 상위 시스템). 기본 포트 **1004**
+  (`clsAsynchronousClient.cs:35 defaultPortNumber`). 우리 기본값은 9870이므로 맞춰야 함
+- PC 프로그램 소스 위치: `/home/jayden/workspace/idti/` (Platinum, DeveiceManager, IntelliScan Device SDK)
+
+### 5.5-1. 통신 안정성 (실제 PC를 붙이기 전 선행) — ✅ 완료 2026-09-08
+
+- [x] **SIGPIPE로 데몬이 죽는 문제** — `main.c`에서 SIGPIPE 무시 + `net.c`의 send에 `MSG_NOSIGNAL`.
+      수정 전 바이너리로 재현됨(응답을 안 읽고 끊는 클라이언트 3회 만에 프로세스 종료), 수정 후 생존 확인
+- [x] **부분 전송 처리** — `AcuNet`에 송신 버퍼(4KB) 추가. `send()`가 일부만 보내면 나머지를 남겨 두고
+      `select()`의 writefds로 이어 보냄. 전송 실패 시 이벤트를 큐에서 빼지 않아 유실되지 않게 함
+- [x] **mock HAL 카드 주입식으로 변경** — `acud_mock.fifo`로 카드/센서를 주입. 예전의 2초마다 자동 태그는
+      `auto on`으로만 동작. (이전에는 이벤트 큐 32개가 1분이면 가득 차 통신 테스트가 불가능했음)
+- [x] **테스트 클라이언트 저장소에 포함** — `tools/idti_client.py` (PC 역할, 접속하는 쪽)
+
+### 5.5-2. 보드에 올리기 (다음 작업)
+
+- [ ] **CM3 보드 OS 결정 및 설치** — 아래 "CM3 OS 선택" 참고
+- [ ] 빌드 방식 결정 — 보드에서 네이티브 빌드(권장) vs 개발 PC 크로스 컴파일
+- [ ] 보드에 의존성 설치 (`build-essential libsqlite3-dev libcjson-dev python3-venv`)
+- [ ] **보드 네트워크** — 고정 IP(또는 DHCP 예약), PC에서 포트 도달 확인
+- [ ] **시간 동기화** — NTP 또는 RTC. IDTi 이벤트는 BCD 시각을 싣기 때문에 시각이 틀리면 이벤트가 무의미.
+      타임존(KST) 설정도 함께
+- [ ] **경로 절대화** — 현재 `config.json`/`acud.db`/`acud.pid`/`acud_mock.fifo`를 전부 cwd 상대경로로 씀.
+      데몬으로 띄우려면 절대경로 또는 WorkingDirectory 지정 필요
+- [ ] **systemd 유닛** (`acud.service`) + 부팅 시 자동 시작
+- [ ] **로그를 stdout -> journald/파일**로 (지금 stdout만이라 데몬화하면 로그가 사라짐)
+- [ ] 웹UI를 보드에서 띄울지 결정 (`webui/app.py:178`이 `0.0.0.0`, Flask 개발 서버)
+
+### 5.5-3. PC와 실제 통신 개통
+
+- [ ] **포트를 1004로 맞출지 결정** — Platinum 기본값이 1004. config.json의 `tcp_port` 변경 또는 PC 쪽 설정
+- [ ] **Device Status 요청(`REQ_STATUS 0x04`) 처리** — 현재 `net.c`의 `handle_request()`가 History 읽기 외
+      전부 무시한다. 상위 시스템은 접속 직후 장치 상태를 먼저 묻는 경우가 많아 **개통의 1차 관문**.
+      PC 소스(`isldev/clsDevFrame.cs`, `clsDevCommand.cs`)에서 실제 요청 순서 확인할 것
+- [ ] **패킷 검증 보강** — Protocol Version, Tail의 ETX 미검증 (현재 STX/헤더 체크섬만 확인)
+- [ ] **Password(헤더 4byte) 검증** — 지금은 파싱만 하고 검증하지 않음. PC가 무슨 값을 보내는지 확인 후 결정
+- [ ] **수신 버퍼 512byte 고정** — 이보다 큰 요청은 통째로 버림. 유저 DB 전송 받으려면 동적 버퍼 필요
+- [ ] Time Sync 처리
+- [ ] 한 응답에 이벤트 여러 건 싣기 (현재 1건씩)
+- [ ] 장치 타입 코드 확정 (현재 `0x29` 임시값) — PC가 어떤 타입을 기대하는지 확인
+- [ ] 이벤트 큐 영속화 (현재 32개 메모리 링버퍼, 재시작 시 유실)
+
+### 5.5-4. CM3 OS 선택 (결정 필요)
+
+- [ ] **개발/개통 단계: Debian 계열 권장** — Radxa 공식 Debian(rsetup) 또는 Armbian Bookworm CLI, **arm64**
+  - `apt`로 sqlite3/cjson/python3를 바로 깔 수 있어 보드에서 네이티브 빌드가 가능 -> 개통이 가장 빠름
+  - 웹UI가 Flask(Python)라 파이썬이 기본 포함된 배포판이 유리 (Buildroot면 파이썬 넣기가 번거로움)
+  - **커널은 Rockchip BSP 계열(5.10)** 이 무난 — CM3 IO 보드의 USB 호스트(J18)/이더넷/eMMC가 검증돼 있음.
+    메인라인 커널은 주변장치 지원을 개별 확인해야 함
+  - **`cdc_acm` 드라이버 포함 여부 확인** — 6단계에서 RRU를 `/dev/ttyACM0`으로 붙이려면 필수
+- [ ] 제품화 단계는 별도 결정 — read-only rootfs + overlayfs로 굳히기, 또는 Yocto/Buildroot로 축소.
+      지금 정할 필요는 없지만 **개발 단계에서 배포판 고유 기능에 의존하지 않게** 짜 둘 것
+- [ ] 설치한 이미지 버전을 기록해 둘 것 (재현 가능해야 함)
+
+---
+
+## 대기 중: 6단계 — RRU 연동 (USB)
+
+> 개발보드 도착 후 착수. 그전까지는 위 5.5단계를 진행한다.
 
 하드웨어 구성이 확정되면서 6단계 내용이 바뀌었다. **RK3566에서 Wiegand를 직접 받는 것이 아니라,
 별도 RRU 보드(리더8 / 입력24 / 출력8)와 USB로 통신**한다. 구성 상세는 [HARDWARE.md](HARDWARE.md).
@@ -138,6 +207,10 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
   - [ ] Flask 개발 서버 → 운영 WSGI 서버(gunicorn 등)로 전환
 
 ### 5단계 (네트워크 통신부) 남은 것
+
+> 이 중 PC 개통에 직접 걸리는 것(Device Status 응답, Time Sync, 다중 이벤트, 큐 영속화, 장치 타입 코드)은
+> 위 **5.5-3**에서 관리한다. 여기는 그 외 남은 것.
+
 - [ ] **유저 DB 대량 송수신** (UserBinaryTransmit, Object `0xD0`/`0xD1`) — 상위 시스템에서 카드 내려받기
 - [ ] Device Output 원격 제어 (원격 문 열기)
 - [ ] Time Sync 처리
