@@ -111,15 +111,39 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 검증돼 있다. `apt`로 의존성을 바로 깔 수 있어
 보드에서 네이티브 빌드가 가능하고, 파이썬이 들어 있어 웹UI(Flask)도 그대로 돌아간다.
 
-- [ ] **이미지 기록** — 위 파일명/빌드 번호(b25)를 그대로 남길 것. 재현 가능해야 함
-- [ ] **부팅 후 바로 확인할 것**
-  - [ ] `uname -r` — 커널 버전 (Rockchip BSP 계열인지)
-  - [ ] `modinfo cdc_acm` 또는 `lsmod` — **6단계에서 RRU를 `/dev/ttyACM0`으로 붙이려면 필수**
-  - [ ] `cat /etc/debian_version`, `dpkg --print-architecture` (arm64여야 함)
-  - [ ] 기본 계정/비밀번호 (Radxa 이미지는 통상 `rock`/`rock`) -> **즉시 변경**
-- [ ] **apt 저장소 동작 확인 (주의)** — Bullseye(Debian 11)는 **2026년 8월로 LTS가 끝났다.**
-      미러가 `archive.debian.org`로 옮겨져 `apt update`가 실패할 수 있다. 실패하면 `sources.list`를
-      archive로 바꿔야 한다. **보드 받자마자 제일 먼저 확인할 것**
+**첫 부팅 확인 결과 (2026-09-08)**
+
+| 항목 | 값 | 판정 |
+|------|-----|------|
+| 커널 | `5.10.160-18-rk356x` | Rockchip BSP 5.10 — 의도대로 |
+| 아키텍처 | `arm64` | OK |
+| Debian | `11.8` (bullseye) | OK |
+| `apt update` | **실패** | 원인 확인 필요 (아래) |
+| `modinfo cdc_acm` | command not found | **드라이버 문제 아님** — `modinfo`는 `/usr/sbin`에 있고 일반 사용자 PATH에 없다. `sudo modinfo cdc_acm`으로 재확인 |
+
+- [x] ~~이미지/커널/아키텍처 확인~~ (위 표)
+- [ ] **`sudo sh tools/board_check.sh` 실행** — 시각/네트워크/저장소/의존성/cdc_acm을 한 번에 확인하는
+      점검 스크립트를 만들어 뒀다 (읽기 전용). 출력으로 아래 항목들을 한꺼번에 판정할 수 있다
+- [ ] **`cdc_acm` 재확인** — `sudo modinfo cdc_acm` 또는
+      `find /lib/modules/$(uname -r) -name 'cdc-acm.ko*'` / `grep CONFIG_USB_ACM /boot/config-$(uname -r)`.
+      **6단계에서 RRU를 `/dev/ttyACM0`으로 붙이려면 필수**
+- [ ] **`apt update` 실패 원인 확정** — 다음 순서로 좁힌다
+  1. **시각** — `date`. RTC 배터리가 없으면 부팅 시각이 엉뚱해지고, 그러면 apt가
+     `Release file is not valid yet`으로 실패한다. **가장 흔한 원인**
+  2. **네트워크/DNS** — `ping 8.8.8.8` / `ping deb.debian.org`
+  3. **저장소 만료** — Bullseye는 2026년 8월로 LTS가 끝나 미러가 `archive.debian.org`로 옮겨졌다.
+     404가 나면 `sources.list`를 아래로 교체:
+     ```
+     deb http://archive.debian.org/debian bullseye main contrib non-free
+     deb http://archive.debian.org/debian-security bullseye-security main contrib non-free
+     ```
+     archive의 Release 파일은 만료 상태라 `Acquire::Check-Valid-Until "false";`도 필요할 수 있다
+  4. **Radxa 저장소** — `/etc/apt/sources.list.d/`의 radxa/rockchip 항목이 죽었으면 주석 처리
+- [ ] **apt가 끝내 안 되면 우회** — 데몬이 필요한 건 헤더 2개(`sqlite3.h`, `cJSON.h`)뿐이다.
+      (a) arm64 `.deb`를 개발 PC에서 받아 `dpkg -i`, (b) 소스를 저장소에 vendoring,
+      (c) 개발 PC에서 크로스 빌드해 바이너리만 복사. **apt가 죽어도 pip(PyPI)는 될 수 있으니
+      웹UI는 별개로 판단할 것**
+- [ ] 기본 계정/비밀번호 (Radxa 이미지는 통상 `rock`/`rock`) -> **즉시 변경**
 - [ ] **의존성 설치** — `build-essential libsqlite3-dev libcjson-dev python3-venv`
       (bullseye의 pip은 오래돼서 Flask 3.x 설치 전에 `pip install -U pip` 필요할 수 있음)
 - [ ] **XFCE 데스크톱 끄기** — 우리 제품은 headless다. `systemctl set-default multi-user.target`으로
