@@ -127,18 +127,19 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
 - [x] ~~`cdc_acm` 재확인~~ -> **있음 (2026-09-08 확인)**.
       `/lib/modules/5.10.160-18-rk356x/kernel/drivers/usb/class/cdc-acm.ko.xz`, alias `char-major-166-*`.
       로더블 모듈이라 RRU를 꽂으면 자동 로드된다. **6단계 USB 경로의 OS 쪽 준비는 끝**
-- [ ] **`apt update` 실패 원인 확정** — 다음 순서로 좁힌다
-  1. **시각** — `date`. RTC 배터리가 없으면 부팅 시각이 엉뚱해지고, 그러면 apt가
-     `Release file is not valid yet`으로 실패한다. **가장 흔한 원인**
-  2. **네트워크/DNS** — `ping 8.8.8.8` / `ping deb.debian.org`
-  3. **저장소 만료** — Bullseye는 2026년 8월로 LTS가 끝나 미러가 `archive.debian.org`로 옮겨졌다.
+- [x] ~~시각 확인~~ -> **정상** (2026-09-08 10:04 UTC, 실제와 일치). NTP가 돌았다는 뜻이므로
+      **네트워크도 살아 있을 가능성이 높다** -> apt 실패는 저장소 문제로 좁혀짐
+- [ ] **타임존을 Asia/Seoul로 변경** — 현재 **UTC**다. acud는 `localtime_r`로 이벤트 시각(BCD)을 만들기
+      때문에 이대로 두면 PC에 9시간 어긋난 시각이 올라간다. `sudo timedatectl set-timezone Asia/Seoul`
+- [ ] **`apt update` 실패 원인 확정** — 시각/네트워크는 배제됐다. 남은 것:
+  1. **저장소 만료 (유력)** — Bullseye는 2026년 8월로 LTS가 끝나 미러가 `archive.debian.org`로 옮겨졌다.
      404가 나면 `sources.list`를 아래로 교체:
      ```
      deb http://archive.debian.org/debian bullseye main contrib non-free
      deb http://archive.debian.org/debian-security bullseye-security main contrib non-free
      ```
      archive의 Release 파일은 만료 상태라 `Acquire::Check-Valid-Until "false";`도 필요할 수 있다
-  4. **Radxa 저장소** — `/etc/apt/sources.list.d/`의 radxa/rockchip 항목이 죽었으면 주석 처리
+  2. **Radxa 저장소** — `/etc/apt/sources.list.d/`의 radxa/rockchip 항목이 죽었으면 주석 처리
 - [ ] **apt가 끝내 안 되면 우회** — 데몬이 필요한 건 헤더 2개(`sqlite3.h`, `cJSON.h`)뿐이다.
       (a) arm64 `.deb`를 개발 PC에서 받아 `dpkg -i`, (b) 소스를 저장소에 vendoring,
       (c) 개발 PC에서 크로스 빌드해 바이너리만 복사. **apt가 죽어도 pip(PyPI)는 될 수 있으니
