@@ -116,7 +116,12 @@ RS-232로 갈 이유도 없어졌다. **USB로 확정.**
 
 RRU MCU는 **STM32C562RE (NUCLEO-C562RE 개발보드)** 로 시작한다. 보드에 네이티브 USB Type-C
 Device 커넥터가 있으므로 **CDC-ACM으로 구현** -> ACU에서 `/dev/ttyACM0`.
-**CP2102/FT232 같은 브릿지 IC가 필요 없다.** 상세는 아래 "RRU MCU" 절 참고.
+**CP2102/FT232 같은 브릿지 IC가 필요 없다.** 상세는 아래 "RRU MCU" 절 참고
+
+> **ACU(호스트) 쪽 준비 완료 (2026-09-08 확인)**: 보드에 올린 Radxa Debian Bullseye b25
+> (커널 `5.10.160-18-rk356x`)에 `cdc-acm` 모듈이 들어 있다
+> (`/lib/modules/5.10.160-18-rk356x/kernel/drivers/usb/class/cdc-acm.ko.xz`).
+> 로더블 모듈이라 RRU를 꽂으면 자동 로드된다. 커널을 다시 빌드할 일은 없다..
 
 ## RRU MCU: STM32C562 (최종 확정)
 

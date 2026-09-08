@@ -119,14 +119,14 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
 | 아키텍처 | `arm64` | OK |
 | Debian | `11.8` (bullseye) | OK |
 | `apt update` | **실패** | 원인 확인 필요 (아래) |
-| `modinfo cdc_acm` | command not found | **드라이버 문제 아님** — `modinfo`는 `/usr/sbin`에 있고 일반 사용자 PATH에 없다. `sudo modinfo cdc_acm`으로 재확인 |
+| `cdc_acm` | **있음** (`cdc-acm.ko.xz`, 로더블 모듈) | RRU 연결 시 자동 로드 — 6단계 준비 완료. (`modinfo` 최초 실패는 `/usr/sbin`이 PATH에 없어서였음) |
 
 - [x] ~~이미지/커널/아키텍처 확인~~ (위 표)
 - [ ] **`sudo sh tools/board_check.sh` 실행** — 시각/네트워크/저장소/의존성/cdc_acm을 한 번에 확인하는
       점검 스크립트를 만들어 뒀다 (읽기 전용). 출력으로 아래 항목들을 한꺼번에 판정할 수 있다
-- [ ] **`cdc_acm` 재확인** — `sudo modinfo cdc_acm` 또는
-      `find /lib/modules/$(uname -r) -name 'cdc-acm.ko*'` / `grep CONFIG_USB_ACM /boot/config-$(uname -r)`.
-      **6단계에서 RRU를 `/dev/ttyACM0`으로 붙이려면 필수**
+- [x] ~~`cdc_acm` 재확인~~ -> **있음 (2026-09-08 확인)**.
+      `/lib/modules/5.10.160-18-rk356x/kernel/drivers/usb/class/cdc-acm.ko.xz`, alias `char-major-166-*`.
+      로더블 모듈이라 RRU를 꽂으면 자동 로드된다. **6단계 USB 경로의 OS 쪽 준비는 끝**
 - [ ] **`apt update` 실패 원인 확정** — 다음 순서로 좁힌다
   1. **시각** — `date`. RTC 배터리가 없으면 부팅 시각이 엉뚱해지고, 그러면 apt가
      `Release file is not valid yet`으로 실패한다. **가장 흔한 원인**
