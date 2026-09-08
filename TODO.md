@@ -57,7 +57,8 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 
 ### 5.5-2. 보드에 올리기 (다음 작업)
 
-- [ ] **CM3 보드 OS 결정 및 설치** — 아래 "CM3 OS 선택" 참고
+- [ ] **OS 이미지 기록(flash) 및 첫 부팅** — 이미지는 결정됨, 아래 "5.5-4" 참고
+      (`xz -dk` 로 풀고 SD에 기록 -> 부팅 -> SSH 접속)
 - [ ] 빌드 방식 결정 — 보드에서 네이티브 빌드(권장) vs 개발 PC 크로스 컴파일
 - [ ] 보드에 의존성 설치 (`build-essential libsqlite3-dev libcjson-dev python3-venv`)
 - [ ] **보드 네트워크** — 고정 IP(또는 DHCP 예약), PC에서 포트 도달 확인
@@ -66,6 +67,9 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 - [ ] **경로 절대화** — 현재 `config.json`/`acud.db`/`acud.pid`/`acud_mock.fifo`를 전부 cwd 상대경로로 씀.
       데몬으로 띄우려면 절대경로 또는 WorkingDirectory 지정 필요
 - [ ] **systemd 유닛** (`acud.service`) + 부팅 시 자동 시작
+  - [ ] **포트 1004는 특권 포트(<1024)다** — 일반 사용자로 띄우면 bind가 실패한다.
+        `AmbientCapabilities=CAP_NET_BIND_SERVICE`를 주거나 root로 실행할 것.
+        (현재 `net_init` 실패 시 데몬은 계속 도니 조용히 통신만 안 되는 상태가 된다 — 로그 확인 필요)
 - [ ] **로그를 stdout -> journald/파일**로 (지금 stdout만이라 데몬화하면 로그가 사라짐)
 - [ ] 웹UI를 보드에서 띄울지 결정 (`webui/app.py:178`이 `0.0.0.0`, Flask 개발 서버)
 
@@ -96,17 +100,33 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 - [ ] 장치 타입 코드 확정 (현재 `0x29` 임시값) — PC가 어떤 타입을 기대하는지 확인
 - [ ] 이벤트 큐 영속화 (현재 32개 메모리 링버퍼, 재시작 시 유실)
 
-### 5.5-4. CM3 OS 선택 (결정 필요)
+### 5.5-4. CM3 OS — **결정됨: Radxa 공식 Debian Bullseye (XFCE) b25**
 
-- [ ] **개발/개통 단계: Debian 계열 권장** — Radxa 공식 Debian(rsetup) 또는 Armbian Bookworm CLI, **arm64**
-  - `apt`로 sqlite3/cjson/python3를 바로 깔 수 있어 보드에서 네이티브 빌드가 가능 -> 개통이 가장 빠름
-  - 웹UI가 Flask(Python)라 파이썬이 기본 포함된 배포판이 유리 (Buildroot면 파이썬 넣기가 번거로움)
-  - **커널은 Rockchip BSP 계열(5.10)** 이 무난 — CM3 IO 보드의 USB 호스트(J18)/이더넷/eMMC가 검증돼 있음.
-    메인라인 커널은 주변장치 지원을 개별 확인해야 함
-  - **`cdc_acm` 드라이버 포함 여부 확인** — 6단계에서 RRU를 `/dev/ttyACM0`으로 붙이려면 필수
+```
+/home/jayden/workspace/radxa/cm3/radxa-cm3-io_debian_bullseye_xfce_b25.img.xz   (1.1GB, xz 압축)
+```
+
+Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 검증돼 있다. `apt`로 의존성을 바로 깔 수 있어
+보드에서 네이티브 빌드가 가능하고, 파이썬이 들어 있어 웹UI(Flask)도 그대로 돌아간다.
+
+- [ ] **이미지 기록** — 위 파일명/빌드 번호(b25)를 그대로 남길 것. 재현 가능해야 함
+- [ ] **부팅 후 바로 확인할 것**
+  - [ ] `uname -r` — 커널 버전 (Rockchip BSP 계열인지)
+  - [ ] `modinfo cdc_acm` 또는 `lsmod` — **6단계에서 RRU를 `/dev/ttyACM0`으로 붙이려면 필수**
+  - [ ] `cat /etc/debian_version`, `dpkg --print-architecture` (arm64여야 함)
+  - [ ] 기본 계정/비밀번호 (Radxa 이미지는 통상 `rock`/`rock`) -> **즉시 변경**
+- [ ] **apt 저장소 동작 확인 (주의)** — Bullseye(Debian 11)는 **2026년 8월로 LTS가 끝났다.**
+      미러가 `archive.debian.org`로 옮겨져 `apt update`가 실패할 수 있다. 실패하면 `sources.list`를
+      archive로 바꿔야 한다. **보드 받자마자 제일 먼저 확인할 것**
+- [ ] **의존성 설치** — `build-essential libsqlite3-dev libcjson-dev python3-venv`
+      (bullseye의 pip은 오래돼서 Flask 3.x 설치 전에 `pip install -U pip` 필요할 수 있음)
+- [ ] **XFCE 데스크톱 끄기** — 우리 제품은 headless다. `systemctl set-default multi-user.target`으로
+      디스플레이 매니저를 내리면 메모리/부팅시간이 준다 (개발 중에는 켜 두고 써도 무방)
+- [ ] **설치 매체 결정** — SD 부팅으로 먼저 개통하고, 제품은 eMMC로 갈지.
+      eMMC 기록은 USB-C OTG + maskrom(rkdeveloptool) 경로가 필요하다
 - [ ] 제품화 단계는 별도 결정 — read-only rootfs + overlayfs로 굳히기, 또는 Yocto/Buildroot로 축소.
-      지금 정할 필요는 없지만 **개발 단계에서 배포판 고유 기능에 의존하지 않게** 짜 둘 것
-- [ ] 설치한 이미지 버전을 기록해 둘 것 (재현 가능해야 함)
+      Bullseye가 이미 oldstable이라 **제품 출하 시점에는 배포판을 다시 정해야 할 가능성이 높다.**
+      지금 코드가 배포판 고유 기능에 의존하지 않게만 해 두면 나중에 갈아탈 수 있다
 
 ---
 

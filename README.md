@@ -27,6 +27,8 @@
 - 기존 제품: STM32 기반, IDTi 프로토콜로 통신
 - 신규 목표: RK3566 또는 RK3568
 - **현재 보유 보드**: RK3566 기반 **Radxa CM3 IO Board**
+- **보드 OS 확정**: Radxa 공식 **Debian Bullseye (XFCE) b25** —
+  `radxa-cm3-io_debian_bullseye_xfce_b25.img.xz`. 확인 항목은 [TODO.md](TODO.md) "5.5-4" 참고
 - 최종적으로 기존 제품과 100% 동일한 IDTi 프로토콜로 통신 가능하게 만드는 것이 목표 (기존 상위 시스템/웹앱과 호환)
 
 ## 시스템 구성
