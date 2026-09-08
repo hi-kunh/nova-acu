@@ -270,6 +270,92 @@ RRU 개발보드가 오기 전까지, **acud를 실제 CM3 IO 보드에서 돌�
   `clsDevFrameAck.cs`, `clsDevEventInfo.cs`, `clsDevCommand.cs`에 실제 구현이 있다.
   **문서에서 애매한 부분(ACK 처리, 요청 순서, 필드 고정값)은 이 소스가 정답**
 
+### PC 소스에서 확인한 프로토콜 사실 (2026-09-08)
+
+`/home/jayden/workspace/idti/DeveiceManager/`(Device Manager, 이하 DM)에 장치와 실제로 통신하는 코드가 있다.
+**문서보다 이쪽이 정확한 근거**다. 특히 `Source/isldev/`가 프레임·이벤트·상태 구조의 구현체이고,
+`Source/IntelliScan Device Manager/`가 그걸 쓰는 응용이다. (소스 주석은 CP949이므로 `iconv -f CP949` 필요)
+
+**1. 접속 방향과 포트** — DM/Platinum 모두 `clsAsynchronousClient.cs`의 `Socket.BeginConnect`로 **장치에
+접속하는 클라이언트**다. ACU가 listen 하는 현재 구조가 맞다. 포트 상수는 세 개:
+
+| 상수 | 값 | 의미 |
+|------|----|------|
+| `defaultPortNumber` | **1004** | PC -> 장치 접속 포트. **우리가 열어야 할 포트** |
+| `defaultPortNumberListener` | 1003 | 설정 항목으로만 존재 (DM 소스에 bind/listen 코드 없음) |
+| `defaultPortNumberControllerListener` | 1002 | 위와 같음 |
+
+**2. Frame Option 16비트 맵** (`clsDevFrame.cs:BuildFrameOptionByte` + `clsDevCommon.CalcBoolArrayToByte`).
+bool 배열 인덱스 0~7이 **뒷 바이트**, 8~15가 **앞 바이트**로 들어가고 바이트 안에서는 LSB부터 채워진다:
+
+| 패킷 위치 | bit | 의미 |
+|-----------|-----|------|
+| `[4]` (앞) | 7 | **IsRequestAck** |
+| `[4]` | 6 | IsPassword |
+| `[4]` | 5 | IsDivFrame |
+| `[4]` | 4 | IsDataInfo |
+| `[4]` | 3 | IsBlocking |
+| `[4]` | 2 | IsReRequestAck |
+| `[4]` | 1 / 0 | AddrTypeFirst / AddrTypeSecond |
+| `[5]` (뒤) | 7 | **IsExcludeDeviceStatus** — 켜지면 응답에서 Device Status를 빼야 함 |
+| `[5]` | 6 | **IsTimeSync** (Event Request 시) |
+| `[5]` | 5 | **IsReRequestEvent** (Event Request 시) — 직전 이벤트를 다시 달라는 뜻 |
+| `[5]` | 4 | **IsCheckSum** — Tail 2byte/4byte를 가르는 비트 |
+| `[5]` | 3 / 2 | IsDoorControl / IsEventImage |
+| `[5]` | 0 | IsTCP |
+
+-> **우리 구현 검증됨**: `protocol.c`가 응답에 쓰는 `p[4]=0x80`(IsRequestAck)과 요청에서 읽는
+`frame_option & 0x0010`(IsCheckSum)이 **둘 다 이 맵과 일치**한다.
+
+**3. Command / Sub / Object 코드** (`isldev/clsDevCommand.cs`)
+
+- Command: `SendAllOver=1, RequestDataRetry=2, SendStatus=3, RequestStatus=4, SendData=5, RequestData=6,
+  SendAck=7, RequestAck=8`
+- Sub: `IsExist=1, Read=2, Write=3, Delete=4, Change=5, Init=6, RequestBlocking=7, SendBlocking=8`
+- Object(일부): `History=1, Action=2, AccessGroup=4, HistoryCount=5, HistoryIndex=6, UserData=33,
+  Device=41, Firmware=42, Controller=43, Input=44, Output=45, Module=46, CardReader=47, FPReader=48,
+  Timezone=104, Validation=105, Holiday=108, CurrentDateTime=200, OperationMode=201, DoorControl=203,
+  UserBinTransStart=208/Continue=209, IOBoardTCPIPConnection=220`
+
+**4. 이벤트 수집 모델이 우리 구현과 다르다** — DM은 이벤트를 이렇게 다룬다:
+
+| 동작 | Command / Sub / Object |
+|------|------------------------|
+| EventReceive | RequestData(6) / Read(2) / **History(1)** |
+| EventCountCheck | RequestData(6) / Read(2) / **HistoryCount(5)** |
+| EventIndexChange | SendStatus(3) / Change(5) / **HistoryIndex(6)** |
+| EventReset | SendStatus(3) / Init(6) / History 계열 |
+
+즉 장치가 이벤트를 **인덱스로 보관**하고 PC가 "몇 개 있냐 -> 인덱스 이동 -> 받기"로 읽어가는 모델이다.
+Event Index 데이터는 `Reserve(1)+Type(1)+Offset(4)+StartDate(6)+EndDate(6)+Reserve(18)`로 날짜 범위 지정도 된다.
+**우리는 전송 즉시 큐에서 빼 버리는 모델**이라 `IsReRequestEvent`(직전 것 다시 달라)를 만족시킬 수 없다.
+개통 자체는 지금 방식으로도 되지만, 실제 상위 시스템과 맞추려면 인덱스 모델로 바꿔야 한다.
+
+**5. 접속 직후 PC가 처음 보내는 명령** — DM의 상태 조회는 `SettingControllerFirmwareCheck`
+= **RequestStatus(4) / Read(2) / Firmware(42=0x2A)** 이다 (`frmNetworkStatus.cs:572`).
+장치 시각 확인(`DeviceDateTimeCheck`)도 "프로토콜에 따로 없어서 펌웨어 받기로 확인한다"며 같은 명령을 쓴다.
+**현재 acud는 History 읽기 외에는 전부 무시하므로 이 첫 명령에 무응답이다 -> 개통의 1차 관문.**
+
+**6. Device Status V2(234byte) 실제 구조** (`isldev/clsDevStatus.cs`)
+
+```
+Category(1) + DeviceType(1) + DateTime(6) + IsExistModule(2)
++ [ ModuleIOType(1) + ModuleIOInstallType(1) + ModuleIOStatus(14) ] x 14모듈 = 224
+= 234
+```
+
+- 우리 코드는 앞 2byte를 `DeviceType 0x0029`(big-endian)로 쓰는데, 실제로는 **[0]=Category, [1]=DeviceType**이다.
+  결과 바이트는 같지만(Category=0x00, Type=0x29) **Category 값이 0이어도 되는지 확인 필요**
+- ModuleIOStatus 14byte는 **바이트마다 상위 니블=IO Type, 하위 니블=IO Status**로 읽는다.
+  6단계에서 RRU를 IO 모듈로 보고할 때 이 인코딩을 따라야 한다
+
+**7. 기타**
+
+- Password는 `IsPassword` 비트가 켜졌을 때만 의미가 있다 (컨트롤러별 설정)
+- 헤더의 Data Block 4필드는 PC 쪽 이름이 `Start / End / Count / OneSize`다 (우리는 Current/End/Total/OneLen)
+- Event Info 36byte의 앞 4byte는 우리처럼 하나의 32bit 코드가 아니라
+  **Type(1) + Object(1) + Code(1) + Error(1)** 로 나뉜다. 바이트 배치는 같아 호환에 문제 없음
+
 ### 통신 안정성 수정 (2026-09-08 완료)
 
 **1. SIGPIPE로 데몬이 통째로 죽던 문제** — `main.c`에 SIGPIPE 무시를 넣고 `net.c`의 send에 `MSG_NOSIGNAL`을

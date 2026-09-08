@@ -39,7 +39,11 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
   (근거: `Platinum/Source/IntelliScan NET Platinum/clsAsynchronousClient.cs` — `BeginConnect`로 장치에 접속)
 - 상대 PC 프로그램: **IntelliScan NET Platinum** (기존 상위 시스템). 기본 포트 **1004**
   (`clsAsynchronousClient.cs:35 defaultPortNumber`). 우리 기본값은 9870이므로 맞춰야 함
-- PC 프로그램 소스 위치: `/home/jayden/workspace/idti/` (Platinum, DeveiceManager, IntelliScan Device SDK)
+- PC 프로그램 소스 위치: `/home/jayden/workspace/idti/` — **`DeveiceManager/`(DM)에 실제 통신 코드가 있다.**
+  `DeveiceManager/Source/isldev/`가 프레임·이벤트·상태 구조 구현체(`clsDevFrame.cs`, `clsDevCommand.cs`,
+  `clsDevEvent.cs`, `clsDevStatus.cs`), `Source/IntelliScan Device Manager/`가 그걸 쓰는 응용.
+  소스 주석은 CP949 -> `iconv -f CP949 -t UTF-8` 로 볼 것.
+  **문서에서 애매한 것은 이 소스를 근거로 삼는다.** 확인한 내용은 README "PC 소스에서 확인한 프로토콜 사실" 참고
 
 ### 5.5-1. 통신 안정성 (실제 PC를 붙이기 전 선행) — ✅ 완료 2026-09-08
 
@@ -67,12 +71,25 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 
 ### 5.5-3. PC와 실제 통신 개통
 
-- [ ] **포트를 1004로 맞출지 결정** — Platinum 기본값이 1004. config.json의 `tcp_port` 변경 또는 PC 쪽 설정
-- [ ] **Device Status 요청(`REQ_STATUS 0x04`) 처리** — 현재 `net.c`의 `handle_request()`가 History 읽기 외
-      전부 무시한다. 상위 시스템은 접속 직후 장치 상태를 먼저 묻는 경우가 많아 **개통의 1차 관문**.
-      PC 소스(`isldev/clsDevFrame.cs`, `clsDevCommand.cs`)에서 실제 요청 순서 확인할 것
+- [ ] **포트를 1004로 맞출지 결정** — DM/Platinum 기본값이 1004. config.json의 `tcp_port` 변경 또는 PC 쪽 설정
+- [ ] **[최우선] 접속 직후 첫 명령에 응답하기** — DM이 상태 조회에 쓰는 것은
+      **RequestStatus(0x04) / Read(0x02) / Object=Firmware(42=0x2A)** (`frmNetworkStatus.cs:572`,
+      `clsDevCommand.cs`의 `SettingControllerFirmwareCheck`). 장치 시각 확인도 같은 명령을 쓴다.
+      현재 acud는 History 읽기 외 전부 무시 -> **무응답이라 개통이 여기서 막힌다**
+  - [ ] 이 요청의 응답 형식(펌웨어 정보 + Device Status) 확인 — `isldev/clsDevFirmwareInfo.cs`
+- [ ] **`IsExcludeDeviceStatus` 비트 처리** — Frame Option `[5]` bit7이 켜지면 응답에서 Device Status(234byte)를
+      빼야 한다. 지금은 무조건 붙인다
+- [ ] **이벤트 수집 모델을 인덱스 방식으로 재검토** — PC는 HistoryCount(5)로 개수를 묻고, HistoryIndex(6)로
+      읽기 위치를 옮기고, History(1)로 받아가고, Init으로 리셋한다. 또 `IsReRequestEvent` 비트로 직전 이벤트를
+      다시 요청할 수 있다. **현재 우리 구현은 전송 즉시 큐에서 빼므로 재요청을 만족시킬 수 없다**
+- [ ] **`IsTimeSync` 비트 처리** — Event Request에 실려 오는 시각 동기화 요청
+- [ ] **Device Status 첫 바이트는 Category, 둘째가 DeviceType** — 우리는 0x0029를 2byte로 쓰고 있어
+      결과적으로 Category=0x00 / Type=0x29가 된다. **Category 0이 유효한 값인지 확인**
+- [ ] **ModuleIOStatus 니블 인코딩** — 14byte 각각 상위 니블=IO Type, 하위 니블=IO Status.
+      6단계에서 RRU를 IO 모듈로 보고할 때 이 형식을 따라야 함
 - [ ] **패킷 검증 보강** — Protocol Version, Tail의 ETX 미검증 (현재 STX/헤더 체크섬만 확인)
-- [ ] **Password(헤더 4byte) 검증** — 지금은 파싱만 하고 검증하지 않음. PC가 무슨 값을 보내는지 확인 후 결정
+- [ ] **Password(헤더 4byte) 검증** — 지금은 파싱만 하고 검증하지 않음.
+      PC는 컨트롤러별 설정으로 `IsPassword` 비트(Frame Option `[4]` bit6)를 켤 때만 의미가 있게 쓴다
 - [ ] **수신 버퍼 512byte 고정** — 이보다 큰 요청은 통째로 버림. 유저 DB 전송 받으려면 동적 버퍼 필요
 - [ ] Time Sync 처리
 - [ ] 한 응답에 이벤트 여러 건 싣기 (현재 1건씩)
