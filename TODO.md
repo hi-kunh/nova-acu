@@ -7,6 +7,8 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 - 현재 위치: **5단계 완료 / 5.5단계(ACU 단독 개통) 진행 중** — RRU 개발보드가 오기 전까지
   **CM3 IO 보드에 acud를 올리고 PC(상위 시스템)와 TCP 통신을 개통**하는 것이 당면 작업.
   6단계(RRU 연동)는 하드웨어 확정 완료, 개발보드 구매 대기
+- **내일 시작 지점: 아래 "5.5-0. 내일 여기서 시작" 절의 명령부터.** 보드는 부팅·점검까지만 끝났고
+  **apt 조치와 타임존 변경은 아직 실행하지 않았다**
 
 ---
 
@@ -44,6 +46,55 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
   `clsDevEvent.cs`, `clsDevStatus.cs`), `Source/IntelliScan Device Manager/`가 그걸 쓰는 응용.
   소스 주석은 CP949 -> `iconv -f CP949 -t UTF-8` 로 볼 것.
   **문서에서 애매한 것은 이 소스를 근거로 삼는다.** 확인한 내용은 README "PC 소스에서 확인한 프로토콜 사실" 참고
+
+### 5.5-0. 내일 여기서 시작 (2026-09-09)
+
+2026-09-08 기준 **보드는 부팅과 환경 점검까지만 끝났다.** 아래는 **아직 하나도 실행하지 않은 상태**다.
+원인 분석은 끝났으니(5.5-4 참고) 그대로 실행하면 된다.
+
+**보드 접속**: `ssh rock@192.168.0.132` (wlan0. 개발 PC는 192.168.0.73으로 같은 대역)
+
+- [ ] **1. 타임존 변경** — 지금 UTC다. acud가 `localtime_r`로 이벤트 BCD 시각을 만들기 때문에
+      이대로면 PC에 9시간 어긋난 시각이 올라간다
+  ```bash
+  sudo timedatectl set-timezone Asia/Seoul
+  date
+  ```
+
+- [ ] **2. apt 고치기** — 원인은 `bullseye-security` Release 만료(2026-09-07 21:13 UTC)와
+      `bullseye-backports` 404. **`sources.list`의 URL은 건드리지 않는다**
+      (deb.debian.org는 아직 bullseye를 정상 서비스 중. archive.debian.org로 옮기면 오히려 security가 없다)
+  ```bash
+  sudo mv /etc/apt/sources.list.d/bullseye-backports.list \
+          /etc/apt/sources.list.d/bullseye-backports.list.disabled
+
+  echo 'Acquire::Check-Valid-Until "false";' \
+      | sudo tee /etc/apt/apt.conf.d/99no-check-valid-until
+
+  sudo apt update
+  ```
+
+- [ ] **3. 빌드 의존성 설치** — gcc/make/git/python3(3.9.2)/venv/pip3는 이미 있다. 헤더 2개만 있으면 된다
+  ```bash
+  sudo apt install -y libsqlite3-dev libcjson-dev
+  ```
+
+- [ ] **4. 저장소 복사 후 빌드**
+  ```bash
+  git clone git@github.com:hi-kunh/nova-acu.git    # 또는 개발 PC에서 scp -r
+  cd nova-acu/acud && make && ./acud
+  ```
+
+- [ ] **5. PC(개발 PC)에서 접속 확인** — 여기까지 되면 **개통 1차 성공**
+  ```bash
+  # 개발 PC에서
+  python3 tools/idti_client.py --host 192.168.0.132 --request status   # Firmware 응답 548byte
+  python3 tools/idti_client.py --host 192.168.0.132                    # 이벤트 조회
+  # 보드에서 카드 주입
+  echo 04A1B2C3D4E5F600 > ~/nova-acu/acud/acud_mock.fifo
+  ```
+
+- [ ] **6. 그 다음** — 5.5-2(경로 절대화, systemd, 로그)와 5.5-3(포트 1004 전환) 진행
 
 ### 5.5-1. 통신 안정성 (실제 PC를 붙이기 전 선행) — ✅ 완료 2026-09-08
 
@@ -132,8 +183,7 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
       로더블 모듈이라 RRU를 꽂으면 자동 로드된다. **6단계 USB 경로의 OS 쪽 준비는 끝**
 - [x] ~~시각 확인~~ -> **정상** (2026-09-08 10:04 UTC, 실제와 일치). NTP가 돌았다는 뜻이므로
       **네트워크도 살아 있을 가능성이 높다** -> apt 실패는 저장소 문제로 좁혀짐
-- [ ] **타임존을 Asia/Seoul로 변경** — 현재 **UTC**다. acud는 `localtime_r`로 이벤트 시각(BCD)을 만들기
-      때문에 이대로 두면 PC에 9시간 어긋난 시각이 올라간다. `sudo timedatectl set-timezone Asia/Seoul`
+- [ ] **타임존을 Asia/Seoul로 변경** — 현재 **UTC**. 명령은 위 5.5-0의 1번 참고 (아직 미실행)
 - [x] ~~`apt update` 실패 원인 확정~~ -> **원인 2개 확정 (2026-09-08, 저장소를 직접 조회해 확인)**
 
   | 저장소 | 상태 | 문제 |

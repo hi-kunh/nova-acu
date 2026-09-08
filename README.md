@@ -401,6 +401,36 @@ python3 tools/idti_client.py --raw                    # 주고받은 바이트 �
 BCD 시각 정상 디코딩, 카드 주입 순서대로 이벤트가 하나씩 빠져나감, `door open` 주입이 다음 이벤트의
 Door Status에 반영됨을 확인.
 
+### 보드 첫 부팅 / 환경 점검 (2026-09-08)
+
+Radxa 공식 Debian Bullseye b25를 올리고 `tools/board_check.sh`로 점검한 결과.
+**여기까지가 오늘 진행분이고, apt 조치·타임존 변경은 아직 실행 전이다** (다음 작업은 TODO "5.5-0" 참고).
+
+| 항목 | 결과 |
+|------|------|
+| 커널 | `5.10.160-18-rk356x` (Rockchip BSP 5.10) |
+| 아키텍처 / OS | `arm64` / Debian 11.8 bullseye |
+| 시각 | 정상 (NTP 동작). **타임존은 UTC -> Asia/Seoul로 바꿔야 함** |
+| 네트워크 | wlan0 `192.168.0.132` UP / **eth0 DOWN** (제품은 이더넷을 쓸 예정) |
+| `cdc_acm` | **있음** (`CONFIG_USB_ACM=m`, `cdc-acm.ko.xz`) -> 6단계 USB 경로 준비 완료 |
+| 이미 설치됨 | gcc, make, git, python3 3.9.2, venv, pip3, `libsqlite3.so.0` |
+| 없음 | `sqlite3.h`, `cJSON.h` (헤더 2개만 설치하면 빌드 가능) |
+| 포트 1004 / 9870 | 둘 다 비어 있음 |
+| `apt update` | **실패** — 원인 확정 (아래) |
+
+**`apt update` 실패 원인** — 저장소를 직접 조회해 확인했다.
+
+- **`bullseye-security`의 Release가 만료됨**: `Valid-Until: 2026-09-07 21:13 UTC`.
+  Bullseye LTS가 2026-08-31에 끝나 더 갱신되지 않는다. apt는 만료된 Release를 거부한다
+- **`bullseye-backports`가 404**: 아카이브에서 제거됨
+- `bullseye` main과 `bullseye-updates`는 Valid-Until이 없어 정상이고, radxa 저장소도 정상이다.
+  **`deb.debian.org`는 아직 bullseye를 서비스하므로 `archive.debian.org`로 옮길 필요가 없다**
+  (오히려 archive에는 `debian-security/bullseye-security`가 없다 — 처음에 세운 가설이 틀렸다)
+- 조치: backports 비활성화 + `Acquire::Check-Valid-Until "false"`. 필요한 패키지
+  (`libsqlite3-dev 3.34.1-3`, `libcjson-dev 1.7.14-1+deb11u1`)는 bullseye main(arm64)에 있다
+
+점검 스크립트는 `tools/board_check.sh` (읽기 전용). 보드에 복사해 실행하면 위 항목을 한 번에 찍어 준다.
+
 ### Firmware(0x2A) 상태 요청 응답 구현 (2026-09-08)
 
 PC가 접속 후 처음 보내는 명령에 응답하도록 했다. **개통의 1차 관문.**
