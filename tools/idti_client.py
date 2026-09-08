@@ -12,8 +12,11 @@ PC 쪽이 TCP 클라이언트로 장치에 접속해 오는 구조이므로, 이
     # 2초마다 계속 조회 (실제 상위 시스템의 폴링 흉내)
     python3 tools/idti_client.py --host 192.168.0.50 --watch
 
-    # Device Status 요청 (아직 acud가 응답하지 않는 것을 확인하는 용도)
+    # 장치 상태 요청 (PC가 접속 후 보내는 첫 명령과 동일)
     python3 tools/idti_client.py --host 192.168.0.50 --request status
+
+    # Device Status를 빼고 달라고 요청 (IsExcludeDeviceStatus 비트)
+    python3 tools/idti_client.py --request status --exclude-status
 
     # 주고받은 바이트 그대로 보기
     python3 tools/idti_client.py --raw
@@ -39,9 +42,17 @@ CMD_REQ_DATA = 0x06
 SUBCMD_READ = 0x02
 
 OBJ_HISTORY = 0x01
+OBJ_FIRMWARE = 0x2A          # 42. PC가 접속 후 장치 상태를 물을 때 쓰는 오브젝트
 
 DEVICE_STATUS_V2_LEN = 234
 EVENT_INFO_LEN = 36
+FIRMWARE_INFO_LEN = 268
+
+# Frame Option 비트 (buf[4]<<8 | buf[5] 로 합친 값 기준)
+FOPT_REQUEST_ACK = 0x8000
+FOPT_EXCLUDE_DEVICE_STATUS = 0x0080
+FOPT_CHECK_PACKET = 0x0010
+FOPT_TCP = 0x0001
 
 EVENT_NAMES = {
     0x01010102: "Access Authorized By Card (허용)",
@@ -56,7 +67,7 @@ DOOR_STATUS_NAMES = {0x00: "None", 0x01: "Open(Not Closed)", 0x02: "Closed"}
 def build_request(command, sub_command, obj,
                   frame_index=1, password=0,
                   start_item=0, end_item=0,
-                  data=b""):
+                  data=b"", frame_option=FOPT_REQUEST_ACK | FOPT_TCP):
     """IDTi V2 요청 패킷을 만든다 (Header 44 + Data + Tail 2)."""
     total_len = HEADER_LEN + len(data) + TAIL_LEN
     p = bytearray(HEADER_LEN)
@@ -65,8 +76,8 @@ def build_request(command, sub_command, obj,
     p[1] = (total_len >> 8) & 0xFF
     p[2] = total_len & 0xFF
     p[3] = PROTOCOL_V2
-    p[4] = 0x80              # Frame Option byte0: IsAckReq=1
-    p[5] = 0x00              # byte1: IsCheckPacket=0 -> Tail 2byte
+    p[4] = (frame_option >> 8) & 0xFF
+    p[5] = frame_option & 0xFF
     p[6] = HEADER_LEN
     # Destination Address (8byte): 장치 쪽. 1:1 연결이라 의미가 크지 않아 1로 채운다
     p[7:15] = bytes([1, 1, 1, 1, 1, 0, 0, 0])
@@ -122,8 +133,14 @@ def parse_response(pkt):
     if pkt[-1] != ETX:
         out.append("  ** ETX로 끝나지 않음")
 
+    frame_option = int.from_bytes(pkt[4:6], "big")
+    out.append(f"  FrameOption=0x{frame_option:04x}"
+               f"{' (ExcludeDeviceStatus)' if frame_option & FOPT_EXCLUDE_DEVICE_STATUS else ''}")
+
     body = pkt[HEADER_LEN:len(pkt) - TAIL_LEN]
-    if len(body) >= DEVICE_STATUS_V2_LEN:
+    if frame_option & FOPT_EXCLUDE_DEVICE_STATUS:
+        out.append("  [Device Status] 응답에서 제외됨 (요청대로)")
+    elif len(body) >= DEVICE_STATUS_V2_LEN:
         ds = body[:DEVICE_STATUS_V2_LEN]
         dev_type = int.from_bytes(ds[0:2], "big")
         out.append(f"  [Device Status] DeviceType=0x{dev_type:04x} "
@@ -133,6 +150,17 @@ def parse_response(pkt):
         body = body[DEVICE_STATUS_V2_LEN:]
     else:
         out.append(f"  [Device Status] 없음 (body {len(body)}byte)")
+
+    if obj == OBJ_FIRMWARE:
+        if len(body) >= FIRMWARE_INFO_LEN:
+            fw = body[:FIRMWARE_INFO_LEN]
+            version = "".join(f"{b:02d}" for b in fw[2:6])
+            out.append(f"  [Firmware] Category={fw[0]} DeviceType=0x{fw[1]:02x} Version={version}")
+            out.append(f"             빌드일시=20{bcd(fw[6]):02d}-{bcd(fw[7]):02d}-{bcd(fw[8]):02d} "
+                       f"{bcd(fw[9]):02d}:{bcd(fw[10]):02d}:{bcd(fw[11]):02d}")
+        else:
+            out.append(f"  [Firmware] 데이터 부족 ({len(body)}byte, 268 필요)")
+        return out
 
     if len(body) >= EVENT_INFO_LEN:
         ev = body[:EVENT_INFO_LEN]
@@ -176,7 +204,10 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="ACU 주소 (기본 127.0.0.1)")
     ap.add_argument("--port", type=int, default=9870, help="ACU 포트 (기본 9870)")
     ap.add_argument("--request", choices=["history", "status"], default="history",
-                    help="history=이벤트 로그 조회(기본), status=Device Status 요청")
+                    help="history=이벤트 로그 조회(기본), "
+                         "status=장치 상태 요청(RequestStatus/Read/Firmware — PC가 접속 후 보내는 첫 명령)")
+    ap.add_argument("--exclude-status", action="store_true",
+                    help="IsExcludeDeviceStatus 비트를 켜서 Device Status 없는 응답을 요청")
     ap.add_argument("--watch", action="store_true", help="끊지 않고 계속 폴링")
     ap.add_argument("--interval", type=float, default=2.0, help="--watch 폴링 주기(초, 기본 2)")
     ap.add_argument("--count", type=int, default=1, help="요청 횟수 (--watch면 무시)")
@@ -187,7 +218,12 @@ def main():
     if args.request == "history":
         command, sub, obj = CMD_REQ_DATA, SUBCMD_READ, OBJ_HISTORY
     else:
-        command, sub, obj = CMD_REQ_STATUS, SUBCMD_READ, 0x00
+        # PC(DM)가 접속 후 장치를 확인할 때 보내는 명령과 동일
+        command, sub, obj = CMD_REQ_STATUS, SUBCMD_READ, OBJ_FIRMWARE
+
+    frame_option = FOPT_REQUEST_ACK | FOPT_TCP
+    if args.exclude_status:
+        frame_option |= FOPT_EXCLUDE_DEVICE_STATUS
 
     try:
         sock = socket.create_connection((args.host, args.port), timeout=args.timeout)
@@ -200,7 +236,8 @@ def main():
     sent = 0
     try:
         while args.watch or sent < args.count:
-            req = build_request(command, sub, obj, frame_index=frame_index)
+            req = build_request(command, sub, obj, frame_index=frame_index,
+                                frame_option=frame_option)
             if args.raw:
                 print(f"송신 {len(req)}byte: {req.hex()}")
             sock.sendall(req)
@@ -210,8 +247,6 @@ def main():
             resp = recv_packet(sock, args.timeout)
             if resp is None:
                 print("응답 없음 (타임아웃 또는 연결 끊김)")
-                if args.request == "status":
-                    print("  -> Device Status 요청은 acud가 아직 처리하지 않는다 (net.c handle_request)")
                 if not args.watch:
                     break
             else:

@@ -17,6 +17,7 @@
 #include <netinet/in.h>
 
 #define NET_RECV_BUF_CAP 512
+#define NET_RESP_BUF_CAP 1024 /* 응답 1건 최대: Header 44 + DeviceStatus 234 + Firmware 268 + Tail 2 = 548 */
 #define NET_SEND_BUF_CAP 4096 /* 응답 1건(316byte)보다 넉넉히. 부분 전송분을 담아 둔다 */
 #define NET_EVENT_QUEUE_CAP 32
 
@@ -269,8 +270,8 @@ static void build_device_status(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], int door
     (void)door_status; /* V2 Device Status 구조체 자체에는 도어 상태 필드가 없음(Event Info 쪽에만 존재) */
 
     memset(out, 0, IDTI_DEVICE_STATUS_V2_LEN);
-    out[0] = (uint8_t)(IDTI_DEVICE_TYPE_ISC101 >> 8);
-    out[1] = (uint8_t)(IDTI_DEVICE_TYPE_ISC101 & 0xFF);
+    out[0] = IDTI_DEVICE_CATEGORY;
+    out[1] = IDTI_DEVICE_TYPE;
 
     struct tm tmv;
     localtime_r(&now, &tmv);
@@ -282,6 +283,29 @@ static void build_device_status(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], int door
     out[7] = idti_to_bcd(tmv.tm_sec);
 
     /* out[8..9] ExistedModule = 0 (확장 IO 모듈 없음), out[10..233] IOModuleStatus = 0 (memset로 처리됨) */
+}
+
+/*
+ * Firmware Info(268byte) = Category(1)+DeviceType(1)+Version(4)+DateTime(6, BCD)+Reserved(256).
+ * PC(DM)가 접속 후 장치를 확인할 때 쓰는 응답 데이터다
+ * (근거: PC 소스 `isldev/clsDevDeviceSetting.cs`의 GetFirmwareInfo).
+ */
+static void build_firmware_info(uint8_t out[IDTI_FIRMWARE_INFO_LEN])
+{
+    memset(out, 0, IDTI_FIRMWARE_INFO_LEN);
+    out[0] = IDTI_DEVICE_CATEGORY;
+    out[1] = IDTI_DEVICE_TYPE;
+    out[2] = IDTI_FW_VERSION_MAJOR;
+    out[3] = IDTI_FW_VERSION_MINOR;
+    out[4] = IDTI_FW_VERSION_PATCH;
+    out[5] = IDTI_FW_VERSION_BUILD;
+    out[6]  = idti_to_bcd(IDTI_FW_DATE_YEAR);
+    out[7]  = idti_to_bcd(IDTI_FW_DATE_MONTH);
+    out[8]  = idti_to_bcd(IDTI_FW_DATE_DAY);
+    out[9]  = idti_to_bcd(IDTI_FW_DATE_HOUR);
+    out[10] = idti_to_bcd(IDTI_FW_DATE_MINUTE);
+    out[11] = idti_to_bcd(IDTI_FW_DATE_SECOND);
+    /* out[12..267] Reserved = 0 (memset로 처리됨) */
 }
 
 static void build_event_info(uint8_t out[IDTI_EVENT_INFO_LEN], const NetEvent *ev)
@@ -313,34 +337,35 @@ static void build_event_info(uint8_t out[IDTI_EVENT_INFO_LEN], const NetEvent *e
     /* out[28..35] Reserved = 0 (memset로 처리됨) */
 }
 
-static void handle_request(AcuNet *net, const IdtiHeader *hdr)
+/*
+ * 응답 한 건을 만들어 송신 큐에 넣는다.
+ *
+ * 응답 데이터는 [Device Status(234)] + [오브젝트 데이터] 순서로 실린다. 요청의 Frame Option에
+ * IsExcludeDeviceStatus가 켜져 있으면 Device Status를 빼고, 그 비트를 응답에도 그대로 실어
+ * PC가 응답 안에 Device Status가 들어 있는지 알 수 있게 한다.
+ *
+ * 반환: 0=송신 큐에 들어감, -1=실패(패킷 생성 실패 또는 송신 버퍼 부족).
+ */
+static int send_response(AcuNet *net, const IdtiHeader *hdr,
+                         uint8_t command, uint8_t sub_command, uint8_t object,
+                         const uint8_t *data, size_t data_len,
+                         uint16_t block_start, uint16_t block_end,
+                         uint16_t block_count, uint16_t block_one_len)
 {
-    if (!(hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ &&
-          hdr->object == IDTI_OBJ_HISTORY))
+    /* Device Status + 가장 큰 오브젝트 데이터(Firmware Info)를 담을 수 있어야 한다 */
+    uint8_t payload[IDTI_DEVICE_STATUS_V2_LEN + IDTI_FIRMWARE_INFO_LEN];
+    size_t payload_len = 0;
+
+    int exclude_status = (hdr->frame_option & IDTI_FOPT_EXCLUDE_DEVICE_STATUS) ? 1 : 0;
+    if (!exclude_status)
     {
-        char line[96];
-        snprintf(line, sizeof(line),
-                 "네트워크: 지원하지 않는 요청 (cmd=0x%02x sub=0x%02x obj=0x%02x) 무시",
-                 hdr->command, hdr->sub_command, hdr->object);
-        log_msg(line);
-        return;
+        build_device_status(payload, net->door_status, time(NULL));
+        payload_len = IDTI_DEVICE_STATUS_V2_LEN;
     }
-
-    uint8_t payload[IDTI_DEVICE_STATUS_V2_LEN + IDTI_EVENT_INFO_LEN];
-    build_device_status(payload, net->door_status, time(NULL));
-    size_t payload_len = IDTI_DEVICE_STATUS_V2_LEN;
-
-    uint16_t cur = 0, end = 0, total = 0, one_len = 0;
-
-    int event_attached = 0;
-    if (net->queue_count > 0)
+    if (data_len > 0 && data != NULL)
     {
-        /* 큐에서 꺼내는 것은 전송에 성공한 뒤에 한다 (전송이 실패하면 이벤트가 유실되므로) */
-        build_event_info(payload + IDTI_DEVICE_STATUS_V2_LEN, &net->queue[net->queue_head]);
-        payload_len += IDTI_EVENT_INFO_LEN;
-        cur = 1; end = 1; total = 1;
-        one_len = IDTI_EVENT_INFO_LEN;
-        event_attached = 1;
+        memcpy(payload + payload_len, data, data_len);
+        payload_len += data_len;
     }
 
     /*
@@ -353,20 +378,44 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr)
     memcpy(dest_addr, hdr->src_addr, IDTI_ADDR_SRC_LEN);
     static const uint8_t src_addr[IDTI_ADDR_SRC_LEN] = {0x01, 0x01, 0x01, 0x01, 0x01};
 
-    uint8_t out[512];
+    uint16_t resp_option = exclude_status ? IDTI_FOPT_EXCLUDE_DEVICE_STATUS : 0;
+
+    uint8_t out[NET_RESP_BUF_CAP];
     int n = idti_build_packet(out, sizeof(out), dest_addr, src_addr,
-                               hdr->frame_index, hdr->password,
-                               IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, IDTI_OBJ_HISTORY,
+                               resp_option, hdr->frame_index, hdr->password,
+                               command, sub_command, object,
                                hdr->start_item, hdr->end_item,
-                               cur, end, total, one_len,
+                               block_start, block_end, block_count, block_one_len,
                                payload, payload_len);
     if (n <= 0)
     {
         log_msg("네트워크: 응답 패킷 생성 실패");
-        return;
+        return -1;
     }
 
-    if (net_queue_send(net, out, (size_t)n) == 0)
+    return net_queue_send(net, out, (size_t)n);
+}
+
+/* Event Log(History, Object 0x01) 조회 요청 처리 */
+static void handle_history_request(AcuNet *net, const IdtiHeader *hdr)
+{
+    uint8_t event[IDTI_EVENT_INFO_LEN];
+    size_t data_len = 0;
+    uint16_t start = 0, end = 0, count = 0, one_len = 0;
+
+    int event_attached = 0;
+    if (net->queue_count > 0)
+    {
+        /* 큐에서 꺼내는 것은 전송에 성공한 뒤에 한다 (전송이 실패하면 이벤트가 유실되므로) */
+        build_event_info(event, &net->queue[net->queue_head]);
+        data_len = IDTI_EVENT_INFO_LEN;
+        start = 1; end = 1; count = 1;
+        one_len = IDTI_EVENT_INFO_LEN;
+        event_attached = 1;
+    }
+
+    if (send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, IDTI_OBJ_HISTORY,
+                      event, data_len, start, end, count, one_len) == 0)
     {
         if (event_attached)
         {
@@ -378,6 +427,50 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr)
     {
         log_msg("네트워크: 응답을 보내지 못해 이벤트를 큐에 남겨 둠 (다음 요청 때 다시 전송)");
     }
+}
+
+/*
+ * Firmware(Object 0x2A) 상태 요청 처리.
+ * PC(DM/Platinum)가 접속한 뒤 장치를 확인할 때 보내는 첫 명령이다
+ * (`frmNetworkStatus.cs`의 SettingControllerFirmwareCheck = RequestStatus/Read/Firmware).
+ * 장치 시각 확인(DeviceDateTimeCheck)도 같은 명령을 쓰므로, 함께 실리는 Device Status의
+ * CurDateTime이 PC가 보는 장치 시각이 된다.
+ *
+ * 응답 Command는 SendStatus(0x03)로 보낸다 - 요청이 RequestStatus(0x04)이므로 Command Table의
+ * Send/Request 짝(3<->4, 5<->6)을 History 응답(RequestData 0x06 -> SendData 0x05)과 같은 방식으로 맞춘 것.
+ * 실제 장치가 무엇을 쓰는지는 PC와 붙여 확인할 것.
+ */
+static void handle_firmware_request(AcuNet *net, const IdtiHeader *hdr)
+{
+    uint8_t firmware[IDTI_FIRMWARE_INFO_LEN];
+    build_firmware_info(firmware);
+
+    send_response(net, hdr, IDTI_CMD_SND_STATUS, IDTI_SUBCMD_READ, IDTI_OBJ_FIRMWARE,
+                  firmware, sizeof(firmware),
+                  1, 1, 1, IDTI_FIRMWARE_INFO_LEN);
+}
+
+static void handle_request(AcuNet *net, const IdtiHeader *hdr)
+{
+    if (hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ &&
+        hdr->object == IDTI_OBJ_HISTORY)
+    {
+        handle_history_request(net, hdr);
+        return;
+    }
+
+    if (hdr->command == IDTI_CMD_REQ_STATUS && hdr->sub_command == IDTI_SUBCMD_READ &&
+        hdr->object == IDTI_OBJ_FIRMWARE)
+    {
+        handle_firmware_request(net, hdr);
+        return;
+    }
+
+    char line[96];
+    snprintf(line, sizeof(line),
+             "네트워크: 지원하지 않는 요청 (cmd=0x%02x sub=0x%02x obj=0x%02x) 무시",
+             hdr->command, hdr->sub_command, hdr->object);
+    log_msg(line);
 }
 
 void net_poll(AcuNet *net, int timeout_ms)

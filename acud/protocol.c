@@ -29,7 +29,7 @@ int idti_header_parse(const uint8_t *buf, size_t len, IdtiHeader *out)
 
     uint16_t packet_length = ((uint16_t)buf[1] << 8) | buf[2];
     uint16_t frame_option   = ((uint16_t)buf[4] << 8) | buf[5];
-    size_t tail_len = (frame_option & 0x0010) ? 4 : 2; /* IsCheckPacket bit */
+    size_t tail_len = (frame_option & IDTI_FOPT_CHECK_PACKET) ? 4 : 2;
 
     if (packet_length < (uint16_t)(IDTI_HEADER_LEN_V2 + tail_len))
     {
@@ -62,6 +62,7 @@ int idti_header_parse(const uint8_t *buf, size_t len, IdtiHeader *out)
 int idti_build_packet(uint8_t *out, size_t out_cap,
                        const uint8_t dest_addr[IDTI_ADDR_DEST_LEN],
                        const uint8_t src_addr[IDTI_ADDR_SRC_LEN],
+                       uint16_t frame_option,
                        uint32_t frame_index, uint32_t password,
                        uint8_t command, uint8_t sub_command, uint8_t object,
                        uint8_t start_item, uint8_t end_item,
@@ -69,7 +70,10 @@ int idti_build_packet(uint8_t *out, size_t out_cap,
                        uint16_t data_total, uint16_t data_one_len,
                        const uint8_t *data, size_t data_len)
 {
-    const size_t tail_len = 2; /* IsCheckPacket=0 고정 (CheckBytes 미포함) */
+    const size_t tail_len = 2; /* CheckBytes를 만들지 않으므로 Tail은 항상 2byte */
+
+    /* IsRequestAck는 세우고 IsCheckPacket은 지운다 (Tail 2byte 고정) */
+    frame_option = (uint16_t)((frame_option | IDTI_FOPT_REQUEST_ACK) & ~IDTI_FOPT_CHECK_PACKET);
     const size_t total_len = IDTI_HEADER_LEN_V2 + data_len + tail_len;
 
     if (total_len > out_cap || total_len > 0xFFFF)
@@ -82,8 +86,8 @@ int idti_build_packet(uint8_t *out, size_t out_cap,
     p[1] = (uint8_t)(total_len >> 8);
     p[2] = (uint8_t)(total_len & 0xFF);
     p[3] = IDTI_PROTOCOL_VERSION_V2;
-    p[4] = 0x80; /* Frame Option byte0: IsAckReq=1, 나머지 fixed 0 */
-    p[5] = 0x00; /* Frame Option byte1: IsCheckPacket=0 등 전부 0 -> Tail 2byte */
+    p[4] = (uint8_t)(frame_option >> 8);
+    p[5] = (uint8_t)(frame_option & 0xFF);
     p[6] = IDTI_HEADER_LEN_V2;
     memcpy(&p[7], dest_addr, IDTI_ADDR_DEST_LEN);
     memcpy(&p[15], src_addr, IDTI_ADDR_SRC_LEN);

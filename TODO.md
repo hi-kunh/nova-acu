@@ -76,19 +76,21 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 ### 5.5-3. PC와 실제 통신 개통
 
 - [ ] **포트를 1004로 맞출지 결정** — DM/Platinum 기본값이 1004. config.json의 `tcp_port` 변경 또는 PC 쪽 설정
-- [ ] **[최우선] 접속 직후 첫 명령에 응답하기** — DM이 상태 조회에 쓰는 것은
-      **RequestStatus(0x04) / Read(0x02) / Object=Firmware(42=0x2A)** (`frmNetworkStatus.cs:572`,
-      `clsDevCommand.cs`의 `SettingControllerFirmwareCheck`). 장치 시각 확인도 같은 명령을 쓴다.
-      현재 acud는 History 읽기 외 전부 무시 -> **무응답이라 개통이 여기서 막힌다**
-  - [ ] 이 요청의 응답 형식(펌웨어 정보 + Device Status) 확인 — `isldev/clsDevFirmwareInfo.cs`
-- [ ] **`IsExcludeDeviceStatus` 비트 처리** — Frame Option `[5]` bit7이 켜지면 응답에서 Device Status(234byte)를
-      빼야 한다. 지금은 무조건 붙인다
+- [x] ~~접속 직후 첫 명령에 응답하기~~ -> **구현 완료 (2026-09-08)**.
+      `RequestStatus(0x04)/Read(0x02)/Firmware(0x2A)` 요청에 `SendStatus(0x03)` + Firmware Info 268byte로 응답.
+      상세는 README "Firmware(0x2A) 상태 요청 응답 구현" 참고
+  - [ ] **응답 Command가 `SendStatus(0x03)`가 맞는지 PC와 붙여 확인** — Command Table의 Send/Request 짝으로
+        추정한 값이다. PC 소스에서 응답 검증 코드를 못 찾음(SDK DLL 안으로 보임)
+  - [ ] **Firmware Version / 빌드일시 값 확정** — 현재 1.0.0.0 / 2026-09-08 (`protocol.h`의 `IDTI_FW_*`)
+- [x] ~~`IsExcludeDeviceStatus` 비트 처리~~ -> **구현 완료**. 켜지면 Device Status를 빼고, 그 비트를
+      응답 Frame Option에도 실어 PC가 응답 구성을 알 수 있게 함
 - [ ] **이벤트 수집 모델을 인덱스 방식으로 재검토** — PC는 HistoryCount(5)로 개수를 묻고, HistoryIndex(6)로
       읽기 위치를 옮기고, History(1)로 받아가고, Init으로 리셋한다. 또 `IsReRequestEvent` 비트로 직전 이벤트를
       다시 요청할 수 있다. **현재 우리 구현은 전송 즉시 큐에서 빼므로 재요청을 만족시킬 수 없다**
 - [ ] **`IsTimeSync` 비트 처리** — Event Request에 실려 오는 시각 동기화 요청
-- [ ] **Device Status 첫 바이트는 Category, 둘째가 DeviceType** — 우리는 0x0029를 2byte로 쓰고 있어
-      결과적으로 Category=0x00 / Type=0x29가 된다. **Category 0이 유효한 값인지 확인**
+- [x] ~~Device Status 첫 바이트는 Category, 둘째가 DeviceType~~ -> 상수를 `IDTI_DEVICE_CATEGORY` +
+      `IDTI_DEVICE_TYPE`으로 분리함 (나가는 바이트는 0x00, 0x29로 동일)
+  - [ ] **Category 0이 유효한 값인지 확인** — PC가 어떻게 해석하는지 미확인
 - [ ] **ModuleIOStatus 니블 인코딩** — 14byte 각각 상위 니블=IO Type, 하위 니블=IO Status.
       6단계에서 RRU를 IO 모듈로 보고할 때 이 형식을 따라야 함
 - [ ] **패킷 검증 보강** — Protocol Version, Tail의 ETX 미검증 (현재 STX/헤더 체크섬만 확인)

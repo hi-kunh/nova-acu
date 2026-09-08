@@ -401,6 +401,41 @@ python3 tools/idti_client.py --raw                    # 주고받은 바이트 �
 BCD 시각 정상 디코딩, 카드 주입 순서대로 이벤트가 하나씩 빠져나감, `door open` 주입이 다음 이벤트의
 Door Status에 반영됨을 확인.
 
+### Firmware(0x2A) 상태 요청 응답 구현 (2026-09-08)
+
+PC가 접속 후 처음 보내는 명령에 응답하도록 했다. **개통의 1차 관문.**
+
+- **요청**: `RequestStatus(0x04) / Read(0x02) / Object=Firmware(0x2A)`
+- **응답**: `SendStatus(0x03) / Read(0x02) / Firmware(0x2A)` + Firmware Info 268byte
+  - 응답 Command를 `SendStatus(0x03)`로 정한 근거는 Command Table의 Send/Request 짝(3<->4, 5<->6)이다.
+    기존 History 응답이 `RequestData(0x06) -> SendData(0x05)`인 것과 같은 방식. **실제 장치가 무엇을
+    쓰는지는 PC와 붙여 확인이 필요하다** (PC 소스에서 응답 Command 검증 코드를 못 찾음 — SDK DLL 안에 있는 듯)
+- **Firmware Info 268byte** = `Category(1) + DeviceType(1) + Version(4) + DateTime(6, BCD) + Reserved(256)`
+  (`isldev/clsDevDeviceSetting.cs`의 `GetFirmwareInfo`). Version 4byte는 PC가 각 byte를 10진수 2자리로
+  이어 붙여 표시한다. 현재 값은 1.0.0.0 / 빌드일시 2026-09-08 (`protocol.h`의 `IDTI_FW_*` 상수)
+- DM은 장치 시각 확인(`DeviceDateTimeCheck`)에도 같은 명령을 쓴다 — **함께 실리는 Device Status의
+  CurDateTime이 PC가 보는 장치 시각**이 되므로 보드 시간 설정이 중요하다
+
+**같이 구현한 것**
+
+- **`IsExcludeDeviceStatus`(Frame Option `[5]` bit7) 처리** — 켜져 있으면 응답에서 Device Status 234byte를
+  빼고, 그 비트를 응답 Frame Option에도 실어 PC가 응답 구성을 알 수 있게 했다.
+  이를 위해 `idti_build_packet()`에 `frame_option` 인자를 추가함(기존에는 `0x8000` 고정)
+- **Device Status의 앞 2byte를 Category/DeviceType으로 분리** — 나가는 바이트는 그대로(0x00, 0x29)지만
+  의미를 맞췄다. `IDTI_DEVICE_TYPE_ISC101` -> `IDTI_DEVICE_CATEGORY` + `IDTI_DEVICE_TYPE`
+- Frame Option 비트를 `protocol.h`에 상수로 정의 (`IDTI_FOPT_*`) — 기존의 매직넘버 `0x0010` 제거
+- 응답 버퍼 512 -> 1024 (`NET_RESP_BUF_CAP`). Firmware 응답이 548byte라 512로는 부족했다
+
+**검증** (`tools/idti_client.py --request status`)
+
+| 요청 | 응답 크기 | 구성 |
+|------|-----------|------|
+| Firmware | **548byte** | Header 44 + DeviceStatus 234 + Firmware 268 + Tail 2 |
+| Firmware + ExcludeDeviceStatus | **314byte** | Header 44 + Firmware 268 + Tail 2 |
+| History (이벤트 1건) | 316byte | 기존과 동일 (회귀 없음) |
+| History + ExcludeDeviceStatus | 82byte | Header 44 + Event 36 + Tail 2 |
+| 미지원 오브젝트(0x2B) | 무응답 | 로그만 남기고 무시 (기존 동작 유지) |
+
 ## 빌드 & 실행
 
 ```bash
