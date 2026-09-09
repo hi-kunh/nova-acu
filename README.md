@@ -899,6 +899,76 @@ SETT 처리        sett_is_for_us, sett_password_ok, sett_validate,
 **도구** — `tools/nm_discover.py --set 192.168.0.200/24 --gw 192.168.0.1 [--password 0000]`.
 실제 절차대로 FIND로 MAC을 먼저 찾은 뒤 SETT를 보낸다.
 
+### 릴리스 번들 — 소스 없이 배포하기 (2026-09-09)
+
+세션 처음에 나온 요구("제품 ACU에 소스코드가 있으면 안 된다")를 실제로 닫는 작업.
+`deploy/release.sh`가 **소스가 들어 있지 않은 배포 단위**를 만든다.
+
+```bash
+# 보드에서 (타깃과 같은 환경이어야 한다 - 아래 "빌드 호스트" 참고)
+ACU_VERSION=$(git rev-parse --short HEAD) sh deploy/release.sh
+#   -> dist/acud-<버전>-aarch64.tar.gz
+
+# 설치 (번들만 있으면 된다)
+tar xzf acud-<버전>-aarch64.tar.gz
+cd acud-<버전>-aarch64 && sudo sh install.sh
+sudo systemctl enable --now acud
+```
+
+**번들 내용 (25.7KB)** — `.c`/`.h`/`.py`가 하나도 없다
+
+```
+acud                      39,848 byte (strip 후. strip 전 49,544)
+install.sh
+acud.service
+acu-netcfg  acu-netcfg-boot.service  acu-netcfg-apply.path  acu-netcfg-apply.service
+sudoers-acu-netcfg
+config.json
+VERSION                   버전 / 아키텍처 / 빌드 시각 / 빌드 OS / glibc
+```
+
+- **`assert_no_source()`가 이 스크립트의 존재 이유다.** 번들에 소스가 섞이면 빌드를 실패시킨다.
+  "소스를 빼는 것"은 사람이 기억해서 될 일이 아니라 검사로 강제해야 한다
+- `VERSION`은 나중에 "이 보드에 뭐가 깔려 있지?"에 답하기 위한 것이다. 보드에는 `.git`을
+  rsync하지 않으므로 `ACU_VERSION` 환경변수로 개발 PC의 커밋을 넘긴다
+
+**빌드 호스트는 타깃과 같아야 한다** — 지금은 보드(Debian 11 bullseye / arm64 / glibc 2.31)에서 만든다.
+개발 PC(Ubuntu 26.04 / glibc 2.43)에서 그냥 크로스 컴파일하면 보드에서 실행되지 않는다.
+`release.sh`는 빌드 호스트를 출력하고 arm64가 아니면 경고한다.
+
+#### install.sh 버그 — 번들 배치를 몰랐다
+
+`install.sh`가 저장소 배치(`../acud/acud`)만 가정하고 있어서 **번들에서는 바이너리를 못 찾았다.**
+번들에서는 바이너리가 `install.sh` 바로 옆에 있다. `find_binary()`로 두 배치를 모두 지원하게 고쳤다:
+인자로 준 경로 > 자기 옆의 `acud` > `../acud/acud`.
+
+#### 검증 — 소스를 보드에서 치우고 돌려 봤다
+
+번들만으로 설치한 뒤 **소스 트리를 보드에서 통째로 치우고** 전 기능을 확인했다.
+
+| 항목 | 소스 없는 상태에서의 결과 |
+|------|---------------------------|
+| 서비스 | `active` |
+| UDP 탐색 | IMIN 정상 (192.168.0.250/255.255.255.0, TCP 1004) |
+| IDTi TCP 상태 요청 | 548byte 응답 |
+| 카드 이벤트 | 주입 -> 316byte 이벤트 수신 |
+| SETT 경로 | 비밀번호 오류를 `FAIL`로 거절 (적용 체인 정상) |
+
+**소스가 없어도 ACU는 온전히 동작한다.** 지금 보드에 소스가 남아 있는 것은 이 보드를
+**빌드 머신으로 겸용**하고 있기 때문이지, 제품에 필요해서가 아니다.
+
+#### 제품 이미지에 아직 남아 있는 것
+
+번들 배포만으로는 부족하고, 이미지 자체에서 걷어내야 하는 것들:
+
+| 대상 | 크기 | 비고 |
+|------|------|------|
+| dev 패키지 (`gcc`, `libc6-dev`, `*-dev`, `linux-libc-dev`, `manpages-dev`) | **약 24MB** | 제품에는 컴파일러가 필요 없다 |
+| XFCE 계열 | **약 26MB** | headless인데 `systemctl get-default`가 아직 `graphical.target` |
+| 소스 트리 | - | 빌드 머신 겸용을 그만두면 사라진다 |
+
+eMMC가 7.3G인 것을 감안하면 이 정리는 용량 문제이기도 하다 (TODO의 eMMC 이전 항목과 연결).
+
 ## 빌드 & 실행
 
 ```bash

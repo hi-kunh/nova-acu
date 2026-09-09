@@ -1,5 +1,6 @@
 # 빌드 산출물
 /acud/acud
+/dist/
 *.o
 build/
 

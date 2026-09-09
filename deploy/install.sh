@@ -10,9 +10,27 @@
 #
 set -eu
 
-BIN_SRC="${1:-$(dirname "$0")/../acud/acud}"
-UNIT_SRC="$(dirname "$0")/acud.service"
-CONF_SRC="$(dirname "$0")/config.json"
+HERE="$(dirname "$0")"
+
+#
+# acud 바이너리를 찾는다. 두 가지 배치를 모두 지원해야 한다:
+#   1) 릴리스 번들  - 바이너리가 install.sh 옆에 있다 (제품 배포 경로. 소스가 없다)
+#   2) 저장소       - 바이너리가 ../acud/acud 에 있다 (개발 중 경로)
+# 인자로 직접 주면 그것이 우선한다.
+#
+find_binary() {
+    if [ $# -ge 1 ] && [ -n "$1" ]; then
+        echo "$1"
+    elif [ -f "$HERE/acud" ]; then
+        echo "$HERE/acud"
+    else
+        echo "$HERE/../acud/acud"
+    fi
+}
+
+BIN_SRC="$(find_binary "${1:-}")"
+UNIT_SRC="$HERE/acud.service"
+CONF_SRC="$HERE/config.json"
 
 BIN_DST=/usr/local/sbin/acud
 CONF_DIR=/etc/acud
@@ -58,19 +76,19 @@ echo "설치: $UNIT_DST"
 # 4-1) 네트워크 설정 헬퍼 + 부팅 시 롤백 + sudoers
 #      화면/키보드가 없는 장치라 IP를 webui로 바꿔야 하는데, 잘못 넣으면 복구할 수단이 없다.
 #      헬퍼가 검증/자동 롤백을 책임지고, webui는 root가 되지 않는다.
-NETCFG_SRC="$(dirname "$0")/acu-netcfg"
+NETCFG_SRC="$HERE/acu-netcfg"
 if [ -f "$NETCFG_SRC" ]; then
     install -m 0755 "$NETCFG_SRC" /usr/local/sbin/acu-netcfg
-    install -m 0644 "$(dirname "$0")/acu-netcfg-boot.service" \
+    install -m 0644 "$HERE/acu-netcfg-boot.service" \
             /etc/systemd/system/acu-netcfg-boot.service
     # UDP 탐색(SETT)이 남긴 요청을 root로 집어 가 적용하는 감시자
-    install -m 0644 "$(dirname "$0")/acu-netcfg-apply.path" \
+    install -m 0644 "$HERE/acu-netcfg-apply.path" \
             /etc/systemd/system/acu-netcfg-apply.path
-    install -m 0644 "$(dirname "$0")/acu-netcfg-apply.service" \
+    install -m 0644 "$HERE/acu-netcfg-apply.service" \
             /etc/systemd/system/acu-netcfg-apply.service
     # sudoers는 문법 오류가 나면 sudo 자체가 막히므로 반드시 검사 후 설치한다
     TMP_SUDO=$(mktemp)
-    cp "$(dirname "$0")/sudoers-acu-netcfg" "$TMP_SUDO"
+    cp "$HERE/sudoers-acu-netcfg" "$TMP_SUDO"
     if visudo -cf "$TMP_SUDO" >/dev/null 2>&1; then
         install -m 0440 -o root -g root "$TMP_SUDO" /etc/sudoers.d/acu-netcfg
         echo "설치: /usr/local/sbin/acu-netcfg, /etc/sudoers.d/acu-netcfg"

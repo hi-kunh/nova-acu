@@ -91,13 +91,23 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 Ubuntu의 `gcc-aarch64-linux-gnu`로 빌드하면 glibc 2.43 심볼을 참조해 보드에서 실행이 안 된다
 (`version 'GLIBC_2.3x' not found`). `-lsqlite3 -lcjson` 링크용 arm64 sysroot도 따로 필요하다.
 
-- [ ] **bullseye arm64 컨테이너 빌드 환경** (podman/docker + qemu-user-static). 타깃과 glibc·라이브러리가
-      정확히 일치하고, 그대로 CI/릴리스 절차가 된다. 개발 PC에는 podman/docker/qemu 모두 미설치 상태
-- [ ] 배포를 **`scp acud` 하나**로 좁히기 (현재는 rsync로 소스 전체를 밀고 있음)
-- [ ] `strip`으로 심볼 제거
+- [x] ~~배포 단위를 소스 없는 번들로 좁히기~~ -> **완료 2026-09-09**. `deploy/release.sh`가
+      `dist/acud-<버전>-aarch64.tar.gz`(25.7KB)를 만든다. `.c`/`.h`/`.py` 없음.
+      **번들만으로 설치한 뒤 소스 트리를 보드에서 치우고 전 기능(탐색/TCP/카드이벤트/SETT)을 확인했다.**
+      상세는 README "릴리스 번들"
+- [x] ~~`strip`으로 심볼 제거~~ -> 49,544 -> 39,848 byte
+- [ ] **bullseye arm64 컨테이너 빌드 환경** — 지금은 **보드에서** 번들을 만든다(타깃과 같은 환경이라 맞다).
+      개발 PC에서 만들려면 컨테이너가 필요하다. `podman`은 apt에 있으나(5.7.0) `qemu-user-static`이
+      저장소에 없어 확인이 필요하다. **개발 PC에 런타임을 설치해야 하므로 사용자 승인 필요**
+  - [ ] 그 전까지는 보드가 빌드 머신을 겸한다. 그래서 보드에 소스가 남아 있는 것이지 제품에 필요해서가 아니다
 - [ ] **webui는 크로스컴파일로 해결되지 않는다** — Flask `app.py`가 그 자체로 소스다.
       제품에 webui를 넣을지, 넣는다면 소스 노출을 어떻게 다룰지 별도 결정 필요
-- [ ] 제품 이미지 절차 정의 (7단계와 연계): gcc/make/git/`*-dev` 제거, read-only rootfs, 소스 미포함
+- [ ] **제품 이미지 절차 정의** (7단계와 연계) — 2026-09-09 실측한 정리 대상:
+  - [ ] dev 패키지 제거 (`gcc`, `libc6-dev`, `*-dev`, `linux-libc-dev`, `manpages-dev`) — **약 24MB**
+  - [ ] XFCE 제거 + `systemctl set-default multi-user.target` — **약 26MB** (현재 `graphical.target`)
+  - [ ] 소스 트리 미포함 (빌드 머신 겸용을 그만두면 자동으로 해결)
+  - [ ] read-only rootfs + overlayfs
+  - **eMMC가 7.3G뿐이라 이 정리는 용량 문제이기도 하다** (위 eMMC 이전 항목과 연결)
 
 ### 5.5-1. 통신 안정성 (실제 PC를 붙이기 전 선행) — ✅ 완료 2026-09-08
 
