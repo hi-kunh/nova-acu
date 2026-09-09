@@ -52,7 +52,9 @@ ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK이 필요하다 - UDP 탐색이 자기 IP/넷마스크를 getifaddrs()로 읽는데
+# 그 함수가 내부적으로 netlink 소켓을 쓴다. 빼면 조용히 0.0.0.0을 보고하게 된다
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

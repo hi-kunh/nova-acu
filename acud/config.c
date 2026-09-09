@@ -15,6 +15,7 @@
 #define ACU_DEFAULT_TCP_PORT 9870
 #define ACU_DEFAULT_PID_PATH "acud.pid"
 #define ACU_DEFAULT_LOG_PATH ""   /* 빈 문자열 = stdout */
+#define ACU_DEFAULT_NET_IFACE "eth0"
 
 void config_set_defaults(AcuConfig *cfg)
 {
@@ -24,6 +25,7 @@ void config_set_defaults(AcuConfig *cfg)
     cfg->tcp_port = ACU_DEFAULT_TCP_PORT;
     snprintf(cfg->pid_path, sizeof(cfg->pid_path), "%s", ACU_DEFAULT_PID_PATH);
     snprintf(cfg->log_path, sizeof(cfg->log_path), "%s", ACU_DEFAULT_LOG_PATH);
+    snprintf(cfg->net_iface, sizeof(cfg->net_iface), "%s", ACU_DEFAULT_NET_IFACE);
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -101,6 +103,7 @@ int config_load(const char *path, AcuConfig *cfg)
     const cJSON *tcp_port = cJSON_GetObjectItemCaseSensitive(root, "tcp_port");
     const cJSON *pid_path = cJSON_GetObjectItemCaseSensitive(root, "pid_path");
     const cJSON *log_path = cJSON_GetObjectItemCaseSensitive(root, "log_path");
+    const cJSON *net_iface = cJSON_GetObjectItemCaseSensitive(root, "net_iface");
 
     if (!cJSON_IsString(db_path) || db_path->valuestring[0] == '\0')
     {
@@ -155,6 +158,15 @@ int config_load(const char *path, AcuConfig *cfg)
     else
     {
         snprintf(cfg->log_path, sizeof(cfg->log_path), "%s", ACU_DEFAULT_LOG_PATH);
+    }
+
+    if (cJSON_IsString(net_iface) && net_iface->valuestring[0] != '\0')
+    {
+        snprintf(cfg->net_iface, sizeof(cfg->net_iface), "%s", net_iface->valuestring);
+    }
+    else
+    {
+        snprintf(cfg->net_iface, sizeof(cfg->net_iface), "%s", ACU_DEFAULT_NET_IFACE);
     }
 
     cJSON_Delete(root);

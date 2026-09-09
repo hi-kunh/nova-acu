@@ -15,10 +15,11 @@ typedef struct {
     int  tcp_port;            /* IDTi 프로토콜 V2 TCP 서버 포트 (5단계, 1~65535) */
     char pid_path[256];      /* PID 파일 경로. 웹 설정 화면이 SIGHUP을 보낼 대상을 찾는 데 쓴다 */
     char log_path[256];      /* 로그 파일 경로. 빈 문자열이면 stdout (systemd에서는 journald로 들어감) */
+    char net_iface[16];      /* UDP 탐색 응답에 실을 네트워크 인터페이스 (MAC/IP/넷마스크를 여기서 읽는다) */
 } AcuConfig;
 
 /*
- * pid_path / log_path는 config.json에 없어도 된다(선택 필드).
+ * pid_path / log_path / net_iface는 config.json에 없어도 된다(선택 필드).
  * 없으면 기본값으로 되돌아가므로, 키를 지우는 것으로 기본 동작을 복구할 수 있다.
  * 나머지 필드는 하나라도 없거나 잘못되면 config_load()가 실패하고 cfg를 건드리지 않는다.
  */

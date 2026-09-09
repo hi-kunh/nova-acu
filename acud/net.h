@@ -24,6 +24,15 @@ void net_shutdown(AcuNet *net);
 void net_poll(AcuNet *net, int timeout_ms);
 
 /*
+ * net_poll의 select에 같이 감시할 읽기 fd를 하나 등록한다.
+ * UDP 탐색처럼 별도 소켓을 쓰는 기능이 자기 select 루프를 따로 돌지 않아도 되게 하기 위함이다
+ * (루프가 둘이면 한쪽이 블록되는 동안 다른 쪽 응답이 늦어진다).
+ * net.c는 그 fd가 무엇인지 알 필요가 없다 - 읽기 가능해지면 on_readable(user)를 부를 뿐이다.
+ * fd < 0 이면 등록을 해제한다.
+ */
+void net_set_aux_reader(AcuNet *net, int fd, void (*on_readable)(void *user), void *user);
+
+/*
  * 출입 판정 결과를 IDTi Event Log(History, Object 0x01)로 상위 시스템에 보고할 큐에 넣는다.
  * id_hex: 허용 시 User ID, 거부 시 Card ID (IDTi Event Structure의 Access ID 규칙과 동일), 16자 hex 문자열.
  * door_status: IDTI_DOOR_STATUS_* 값 (판정 시점의 문 상태).

@@ -14,6 +14,7 @@
 #include "hal.h"
 #include "config.h"
 #include "net.h"
+#include "discover.h"
 #include "protocol.h"
 
 /*
@@ -31,6 +32,8 @@
  *   나머지(db/pid/log)는 config.json 안에서 절대경로로 준다.
  * - 출입 판정 결과는 net.h를 통해 상위 시스템(PC)에 IDTi Event Log(History)로 보고한다.
  *   네트워크 초기화가 실패해도(포트 사용 중 등) 출입 판정 자체는 계속 동작한다(fail-safe).
+ * - discover.h로 UDP 브로드캐스트 탐색(netmodule 프로토콜)에 응답한다. 상위 PC가 장치 IP를
+ *   몰라도 장비를 찾을 수 있게 하는 경로다. 이것도 실패해도 데몬 본체는 계속 돈다.
  */
 
 #define DEFAULT_CONFIG_PATH "config.json" /* -c 로 덮어쓸 수 있다. 데몬으로 띄울 때는 절대경로를 준다 */
@@ -45,6 +48,12 @@ static void print_usage(const char *argv0)
             "\n"
             "db_path / pid_path / log_path 는 설정 파일 안에서 지정한다.\n",
             argv0, DEFAULT_CONFIG_PATH);
+}
+
+/* net_poll의 select가 탐색 소켓을 읽을 수 있다고 알려줄 때 불린다 */
+static void on_discover_readable(void *user)
+{
+    discover_service((AcuDiscover *)user);
 }
 
 /* a - b를 밀리초로 반환한다 (CLOCK_MONOTONIC 기준) */
@@ -182,6 +191,13 @@ int main(int argc, char **argv)
 
     AcuNet *net = net_init(cfg.tcp_port); /* 실패해도 net=NULL로 계속 진행 (출입 판정은 네트워크 없이도 동작) */
 
+    /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
+    AcuDiscover *disc = discover_init(cfg.net_iface, cfg.tcp_port);
+    if (net && disc)
+    {
+        net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
+    }
+
     struct timespec next_card_check;
     clock_gettime(CLOCK_MONOTONIC, &next_card_check);
 
@@ -237,12 +253,43 @@ int main(int argc, char **argv)
                     {
                         net_shutdown(net);
                         net = new_net;
+                        /* net을 새로 만들었으니 탐색 소켓도 다시 얹어 준다 */
+                        if (disc)
+                        {
+                            net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
+                            discover_set_tcp_port(disc, new_cfg.tcp_port);
+                        }
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");
                     }
                     else
                     {
                         log_msg("새 네트워크 포트 열기 실패 -> 기존 포트 유지");
                         new_cfg.tcp_port = cfg.tcp_port;
+                    }
+                }
+                if (strcmp(new_cfg.net_iface, cfg.net_iface) != 0)
+                {
+                    /* 탐색이 보고할 인터페이스가 바뀌었다. 소켓은 그대로 두고 대상만 바꾸면 되므로
+                     * 재생성이 필요하다 (iface는 discover_init에서 정해진다) */
+                    AcuDiscover *new_disc = discover_init(new_cfg.net_iface, new_cfg.tcp_port);
+                    if (new_disc)
+                    {
+                        if (net)
+                        {
+                            net_set_aux_reader(net, -1, NULL, NULL);
+                        }
+                        discover_shutdown(disc);
+                        disc = new_disc;
+                        if (net)
+                        {
+                            net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
+                        }
+                        log_msg("탐색 인터페이스 변경 적용됨");
+                    }
+                    else
+                    {
+                        log_msg("새 인터페이스로 탐색 소켓 열기 실패 -> 기존 유지");
+                        snprintf(new_cfg.net_iface, sizeof(new_cfg.net_iface), "%s", cfg.net_iface);
                     }
                 }
                 cfg = new_cfg;
@@ -299,6 +346,11 @@ int main(int argc, char **argv)
         {
             net_poll(net, (int)remaining_ms); /* 다음 카드 조회 시각까지 상위 시스템 접속/요청 처리 */
         }
+        else if (disc)
+        {
+            /* TCP 서버가 못 떴어도 탐색에는 답해야 한다 - 오히려 그때가 PC가 장비를 찾아야 하는 상황이다 */
+            discover_wait(disc, (int)remaining_ms);
+        }
         else
         {
             struct timespec sleep_ts = { remaining_ms / 1000, (remaining_ms % 1000) * 1000000L };
@@ -306,6 +358,7 @@ int main(int argc, char **argv)
         }
     }
 
+    discover_shutdown(disc);
     net_shutdown(net);
     db_close(db);
     hal_shutdown();

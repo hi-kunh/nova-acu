@@ -45,6 +45,11 @@ struct AcuNet {
     NetEvent queue[NET_EVENT_QUEUE_CAP];
     size_t queue_head;
     size_t queue_count;
+
+    /* net_poll의 select에 얹어 주는 외부 fd (UDP 탐색 등). -1이면 없음 */
+    int   aux_fd;
+    void (*aux_on_readable)(void *user);
+    void *aux_user;
 };
 
 static void set_nonblocking(int fd)
@@ -144,6 +149,7 @@ AcuNet *net_init(int port)
     }
     net->client_fd = -1;
     net->door_status = IDTI_DOOR_STATUS_NONE;
+    net->aux_fd = -1; /* calloc이 0으로 채우므로 명시적으로 -1을 넣어야 한다 */
 
     net->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (net->listen_fd < 0)
@@ -473,6 +479,17 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr)
     log_msg(line);
 }
 
+void net_set_aux_reader(AcuNet *net, int fd, void (*on_readable)(void *user), void *user)
+{
+    if (!net)
+    {
+        return;
+    }
+    net->aux_fd = fd;
+    net->aux_on_readable = on_readable;
+    net->aux_user = user;
+}
+
 void net_poll(AcuNet *net, int timeout_ms)
 {
     if (!net)
@@ -485,6 +502,14 @@ void net_poll(AcuNet *net, int timeout_ms)
     FD_ZERO(&writefds);
     FD_SET(net->listen_fd, &readfds);
     int maxfd = net->listen_fd;
+    if (net->aux_fd >= 0)
+    {
+        FD_SET(net->aux_fd, &readfds);
+        if (net->aux_fd > maxfd)
+        {
+            maxfd = net->aux_fd;
+        }
+    }
     if (net->client_fd >= 0)
     {
         FD_SET(net->client_fd, &readfds);
@@ -506,6 +531,11 @@ void net_poll(AcuNet *net, int timeout_ms)
     if (rc <= 0)
     {
         return;
+    }
+
+    if (net->aux_fd >= 0 && FD_ISSET(net->aux_fd, &readfds) && net->aux_on_readable)
+    {
+        net->aux_on_readable(net->aux_user);
     }
 
     if (net->client_fd >= 0 && FD_ISSET(net->client_fd, &writefds))
