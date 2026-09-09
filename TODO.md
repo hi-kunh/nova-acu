@@ -4,12 +4,19 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 완료된 단계의 **상세 기록은 [README.md](README.md)** 에 있고, 이 파일은 "무엇이 남았는지"만 관리한다.
 
 - 최종 갱신: 2026-09-09
-- 현재 위치: **5단계 완료 / 5.5단계(ACU 단독 개통) 진행 중** — RRU 개발보드가 오기 전까지
-  **CM3 IO 보드에 acud를 올리고 PC(상위 시스템)와 TCP 통신을 개통**하는 것이 당면 작업.
-  6단계(RRU 연동)는 하드웨어 확정 완료, 개발보드 구매 대기
-- **2026-09-09: 보드 개통 1차 성공.** acud가 CM3 IO 보드에서 돌고, 개발 PC와 TCP로 상태 요청 응답 +
-  카드 이벤트 수신까지 확인했다. 상세는 [README.md](README.md) "보드 개통 성공 (2026-09-09)".
-  **다음 시작 지점: 아래 "5.5-0. 다음 여기서 시작" 절.**
+- 현재 위치: **5단계 완료 / 5.5단계(ACU 단독 개통) 거의 완료** — RRU 개발보드 도착 전까지의 작업
+- **내일 시작 지점: 아래 "5.5-0. 내일 여기서 시작"**
+
+**2026-09-09에 끝난 것** (상세는 [README.md](README.md))
+
+| | 내용 |
+|---|------|
+| 개통 | acud가 보드에서 돌고 PC와 TCP 통신. 카드 -> 판정 -> 이벤트 전 경로 확인 |
+| 데몬화 | 경로 절대화, systemd 유닛, journald 로그. 부팅 지연 46초 -> 8초 |
+| eth0 | 1Gbps 개통, **고정 IP 192.168.0.250/24** |
+| webui | 네트워크 설정 화면 + 충돌검사/자동롤백/부팅롤백 |
+| UDP 탐색 | `FIND`/`IMIN` + `SETT` — **기존 Device Manager가 PC 변경 없이 우리 ACU를 발견·설정** |
+| 배포 | 소스 없는 릴리스 번들 + bullseye arm64 컨테이너 빌드 |
 
 ---
 
@@ -21,60 +28,142 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 | 1 | SQLite3 + 출입 판정 로직 | ✅ 완료 |
 | 2 | 하드웨어 추상화 계층(HAL) 인터페이스 확정 | ✅ 완료 |
 | 3 | config.json 감시 + 무중단 리로드(SIGHUP) | ✅ 완료 |
-| 4 | 웹 설정 인터페이스 (Flask) | 🔶 1차 범위만 (config 편집) |
+| 4 | 웹 설정 인터페이스 (Flask) | 🔶 config 편집 + 네트워크 설정 |
 | 5 | 네트워크 통신부 (TCP, IDTi 프로토콜 V2) | 🔶 1차 범위만 (Event Log 응답) |
-| 5.5 | **ACU 단독 개통 (CM3 보드 + PC 통신)** | 🔶 **개통 + 데몬화 완료 (2026-09-09)** / 실제 PC 연동 남음 |
+| 5.5 | **ACU 단독 개통 (CM3 보드 + PC 통신)** | 🔶 **개통·데몬화·배포 완료** / 실제 PC 연동 남음 |
 | 6 | 실제 하드웨어 (USB, ACU↔RRU) | ⬜ 개발보드 대기 |
-| 7+ | 배포/운영 (systemd, 보안 강화 등) | ⬜ 미착수 |
+| 7+ | 배포/운영 (제품 이미지, 보안 강화) | ⬜ **OS 자체 빌드 방향 확정, 방식(A/B/C) 택일 대기** |
 
 범례: ✅ 완료 · 🔶 부분 완료(남은 항목 아래 참고) · ⬜ 미착수
 
 ---
 
+## ⚠ 선행 결정: 최종 OS — **자체 빌드 방향으로 확정 (2026-09-09)**
+
+**결정**: 자체 IO 보드를 제작할 예정이므로 **OS를 직접 빌드할 수 있는 방향으로 간다.**
+벤더 완제 이미지(Radxa Debian Bullseye XFCE b25)는 개발용으로만 쓴다.
+
+**왜 필요한가** — 자체 보드는 핀 배치, 이더넷 PHY, USB, 전원 시퀀스가 CM3 IO 보드와 다르다.
+**커스텀 디바이스트리(+ u-boot, 커널 설정)가 반드시 필요하고, 그건 벤더 이미지로는 못 한다.**
+게다가 bullseye는 이미 EOL(2026-08-31)이라 출하 시점에는 어차피 갈아타야 한다.
+
+### 무엇을 "빌드"할 것인가 — 세 갈래 (택일 필요)
+
+**커널/DT/u-boot를 직접 빌드해야 하는 것은 세 안 모두 동일하다.** 갈리는 건 **유저랜드**다.
+
+| | A. Debian 기반 자체 이미지 | B. Buildroot | C. Yocto |
+|---|---|---|---|
+| 유저랜드 | Debian rootfs를 레시피로 재현 빌드 (`rbuild`/`debos`/`mmdebstrap`) | 소스에서 전부 빌드 | 소스에서 전부 빌드, 레이어 구성 |
+| 이미지 크기 | 큼 (수백 MB~) | **가장 작음** (수십 MB) | 작음 (구성하기 나름) |
+| 학습·구축 비용 | **가장 낮음** | 중간 | **가장 높음** |
+| apt / 패키지 업데이트 | **있음** | 없음 (전체 재빌드) | 패키지 피드 구성 가능 |
+| 보안 업데이트 (제품 수명 동안) | 배포판에 얹혀 감 | 직접 추적해야 함 | 레이어 갱신으로 대응 |
+| **NetworkManager** | **유지됨** | 기본 아님 (ifupdown/dhcpcd) | 선택 가능하나 기본 아님 |
+| **`deploy/acu-netcfg` 재사용** | **거의 그대로** | **다시 써야 함** | **다시 써야 함** |
+| init | systemd | 기본 BusyBox init (systemd 선택 가능) | systemd 선택 일반적 |
+| RK3566 지원 | Radxa/Rockchip 이미지 빌드 도구 | Rockchip 공식 SDK가 Buildroot 기반 | `meta-rockchip` |
+
+- [ ] **A/B/C 중 택일** — 아래를 판단 기준으로
+  - **제품 수명 동안 보안 업데이트를 어떻게 줄 것인가** (출입통제 장비라 무시하기 어렵다)
+  - **팀이 감당할 유지보수 비용** — Yocto는 강력하지만 사람이 붙어야 한다
+  - eMMC 7.3G 안에 들어가야 한다 (A도 정리하면 들어가지만 B/C가 훨씬 여유롭다)
+- [ ] 선택 후 **빌드 환경 구축 + 첫 이미지 부팅**까지 해 볼 것 (지금 CM3 IO 보드로)
+
+> **참고 의견**: 지금 단계에서는 **A(Debian 기반 자체 이미지)** 가 위험이 가장 낮다.
+> 커스텀 보드에 필요한 것은 대부분 **커널/DT/u-boot**이고 그건 A에서도 직접 빌드한다.
+> 유저랜드까지 소스 빌드로 바꾸는 것은 그 다음 결정으로 미룰 수 있고, 그때 옮겨가도 늦지 않다.
+> **A에서 B/C로 가는 것보다, B/C에서 급히 A로 되돌아오는 쪽이 훨씬 아프다.**
+
+### 커널 / 디바이스트리 (세 안 공통, 자체 보드의 핵심)
+
+- [ ] **CM3 IO 보드 DT를 출발점으로 자체 보드 DT 작성** — 핀 먹싱, 이더넷 PHY(RTL8211F),
+      USB(호스트/OTG), I2C(OLED·GPIO 확장), GPIO(버튼·LED)
+- [ ] u-boot 빌드 및 부팅 매체 결정 (SD -> eMMC)
+- [ ] 커널 설정에서 불필요한 드라이버 제거 (용량·부팅시간)
+- [ ] **`cdc_acm` 유지 확인** — 6단계 RRU USB 경로에 필수 (현재 이미지에는 있음)
+
+### OS 결정과 무관하게 이미 안전한 것 (2026-09-09 결합도 확인)
+
+| 계층 | OS 의존도 |
+|------|-----------|
+| `acud/` C 소스 전부 | **없음.** C11 + POSIX + sqlite3/cJSON. `/sys`·`/proc`·`getifaddrs`·`IP_PKTINFO`는 리눅스 공통이지 배포판 고유가 아니다 |
+| IDTi 프로토콜 / UDP 탐색 / DB / 출입 판정 / webui | **없음** |
+| `deploy/*.service`, `*.path`, `install.sh` | **systemd에 묶임** (배포판이 아니라 init 시스템). Buildroot 기본 BusyBox init이면 다시 써야 하지만 유닛이 작아 부담은 작다 |
+| **`deploy/acu-netcfg`** | **NetworkManager에 묶임 — 가장 위험.** `nmcli` 14곳 + `/etc/NetworkManager/system-connections/` 전제. 다만 인터페이스(`show`/`check`/`apply`/`confirm`/`rollback`/`apply-request`)는 유지되므로 **acud와 webui는 안 바뀐다.** 갈아끼울 지점이 파일 하나로 격리돼 있다 |
+| `Containerfile.build` | bullseye 고정 + apt 핀 workaround. 타깃이 바뀌면 `FROM` 한 줄 + 그 부분 교체 |
+| **릴리스 번들 / 컨테이너 빌드 구조** | **없음.** 어떤 OS로 가든 "타깃과 같은 환경에서 빌드해 바이너리만 배포"는 그대로 유효하다 |
+
+**결정 전에는 하지 말 것** — 하면 통째로 버려진다
+
+- 지금 이미지에서 패키지 걷어내기 (2026-09-09에 시작했다가 중단함)
+- read-only rootfs / overlayfs 구성
+- eMMC 이전
+
+---
+
 ## 진행 중: 5.5단계 — ACU 단독 개통 (CM3 IO 보드 + PC 통신)
 
-RRU 개발보드가 도착하기 전까지 할 수 있는 일. **acud를 실제 CM3 IO 보드에서 돌리고, PC(상위 시스템)와
-TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 대체한다.
+**확정된 전제**
 
-**확정된 전제 (2026-09-08)**
+- 연결 방향: **PC가 TCP 클라이언트로 ACU에 접속해 온다.** ACU는 listen 하는 서버
+  (근거: `Platinum/Source/IntelliScan NET Platinum/clsAsynchronousClient.cs`)
+- 상대 PC 프로그램: **IntelliScan NET Platinum**, 기본 포트 **1004** (우리도 1004로 맞춤)
+- PC 프로그램 소스: `/home/jayden/workspace/idti/` — `DeveiceManager/`에 실제 통신 코드.
+  주석은 CP949 -> `iconv -f CP949 -t UTF-8`. **문서가 애매하면 이 소스를 근거로 삼는다**
 
-- 연결 방향: **PC가 TCP 클라이언트로 ACU에 접속해 온다.** ACU는 지금처럼 listen 하는 서버가 맞음
-  (근거: `Platinum/Source/IntelliScan NET Platinum/clsAsynchronousClient.cs` — `BeginConnect`로 장치에 접속)
-- 상대 PC 프로그램: **IntelliScan NET Platinum** (기존 상위 시스템). 기본 포트 **1004**
-  (`clsAsynchronousClient.cs:35 defaultPortNumber`). 우리 기본값은 9870이므로 맞춰야 함
-- PC 프로그램 소스 위치: `/home/jayden/workspace/idti/` — **`DeveiceManager/`(DM)에 실제 통신 코드가 있다.**
-  `DeveiceManager/Source/isldev/`가 프레임·이벤트·상태 구조 구현체(`clsDevFrame.cs`, `clsDevCommand.cs`,
-  `clsDevEvent.cs`, `clsDevStatus.cs`), `Source/IntelliScan Device Manager/`가 그걸 쓰는 응용.
-  소스 주석은 CP949 -> `iconv -f CP949 -t UTF-8` 로 볼 것.
-  **문서에서 애매한 것은 이 소스를 근거로 삼는다.** 확인한 내용은 README "PC 소스에서 확인한 프로토콜 사실" 참고
+### 5.5-0. 내일 여기서 시작
 
-### 5.5-0. 다음 여기서 시작 (2026-09-09 갱신)
+**보드 접속**: `ssh rock@192.168.0.250` (eth0 고정) 또는 `ssh rock@192.168.0.132` (wlan0 예비).
+개발 PC는 192.168.0.73. SSH 키 인증 설정됨
 
-**개통 1차 성공까지 끝났다.** 아래 1~5번은 모두 완료. 상세 기록은 README 참고.
+**보드 현재 상태 (2026-09-09 마감 시점)**
 
-**보드 접속**: `ssh rock@192.168.0.132` (wlan0. 개발 PC는 192.168.0.73). SSH 키 인증 설정됨
+- acud가 systemd 서비스로 동작 중, 포트 1004, UDP 탐색 동작
+- **headless로 전환됨** (`multi-user.target`, lightdm 중지). 되돌리려면
+  `sudo systemctl set-default graphical.target && sudo systemctl enable --now lightdm`
+- **패키지는 하나도 지우지 않았다** (최종 OS 미정이라 중단. 위 "선행 결정" 참고)
+- 소스 트리 `~/nova-acu`가 남아 있음 (이제 빌드에 불필요)
 
-- [x] ~~1. 타임존 변경~~ -> **완료**. `Asia/Seoul` (KST, +0900), NTP 동기화 정상
-- [x] ~~2. apt 고치기~~ -> **완료**. 단 **앞선 조치안대로는 실패한다** — `bullseye-security`도 함께
-      비활성화해야 했다(풀의 .deb가 404). 아래 5.5-4의 갱신된 블록 참고
-- [x] ~~3. 빌드 의존성 설치~~ -> **완료**. `libsqlite3-dev`, `libcjson-dev`, `libc6-dev`
-      (헤더 2개면 된다는 판단은 틀렸다 — `libc6-dev`가 아예 없었다)
-- [x] ~~4. 저장소 복사 후 빌드~~ -> **완료**. `git clone`은 보드에 GitHub 키가 없어 실패 -> **rsync로 확정**
-      ```bash
-      # 개발 PC에서
-      rsync -av --exclude .git --exclude '__pycache__' ~/workspace/nova-acu/ rock@192.168.0.132:~/nova-acu/
-      ```
-      빌드는 경고 0개, `acud` ELF aarch64 PIE 39,520byte
-- [x] ~~5. PC에서 접속 확인~~ -> **완료. 개통 1차 성공**.
-      Firmware 상태 요청 548byte 응답, 카드 주입 -> 허용 판정 -> 이벤트 316byte 수신
+#### A. OS 결정을 기다리지 않고 할 수 있는 것 (권장 순서)
 
-**다음 할 일 (우선순위 순)**
+- [ ] **1. 보드 기본 계정 비밀번호 변경** — 아직 `rock`/`rock`이다. 제일 먼저 할 것
+- [ ] **2. 실제 PC 프로그램과 연동** (5.5-3) — 이게 5.5단계의 마지막 관문이다
+  - [ ] IntelliScan NET Platinum을 붙여 이벤트가 올라가는지 확인
+  - [ ] **Device Manager의 search로 우리 ACU가 보이는지 확인** — `IMIN`에 `PasswordSetFlag=1`을
+        실어 뒀는데 실제 도구가 비밀번호를 보내는지 미확인이다. 안 보내면 `SETT`가 항상 거절된다
+  - [ ] 응답 Command가 `SendStatus(0x03)`가 맞는지 확인 (Command Table로 추정한 값이다)
+- [ ] **3. webui를 서비스로 올리기** — 네트워크 설정이 webui에 들어갔으므로 **없으면 현장에서
+      IP를 못 바꾼다**. 지금은 Flask 개발 서버를 손으로 띄운다
+  - [ ] 보드에 Flask 미설치 (`python3-venv` 필요)
+  - [ ] `ACU_WEBUI_SECRET`이 기본값 `dev-only-change-me` — 배포 전 반드시 변경
+  - [ ] 4자리 PIN + HTTP 평문. 네트워크 설정까지 다루게 됐으니 인증 강화가 더 급해졌다
+- [ ] **4. UDP 탐색 마무리**
+  - [ ] `IMIN`의 `DhcpMode`(항상 0)와 `Connect`(항상 0)를 실제 상태로 채우기
+  - [ ] `SETT`의 `RemotePort` 반영 — config.json 소유권 정리가 먼저다(webui가 관리 중)
+  - [ ] 탐색을 끌 수 있는 설정 추가 여부
+- [ ] **5. USB 커미셔닝** (`g_ether`) — 네트워크 설정이 망가져도 통하는 최후 경로.
+      OTG0는 RRU용 USB(J18)와 별개 포트임을 확인했다. 소프트웨어만으로 시험 가능
+- [ ] **6. `192.168.0` 프리픽스를 설정값으로** — 코드에 박지 말 것. 기본값만 `192.168.0`
+- [ ] **7. 공장 기본 IP 중복 대비** — 신품 여러 대 동시 연결 시 전부 같은 주소가 된다.
+      부팅 시 `arping -D`로 충돌 감지 -> IP 올리지 말고 LED로 알림
+- [ ] **8. 설정 백업/복원** — 보드 교체 시 이전 주소·설정을 되살리는 유일한 수단
 
-- [ ] **빌드/배포 방식을 바이너리 전용으로 전환** — 아래 5.5-5 (새 절). 제품 ACU에 소스와
-      툴체인이 남지 않게 하는 작업. 개통이 끝났으니 이제 착수할 시점이다
-- [x] ~~**5.5-2** 경로 절대화, systemd 유닛, 로그를 journald로~~ -> **완료 2026-09-09**. eth0도 개통됨
-- [ ] **5.5-3** 포트 1004 전환 후 실제 PC 프로그램(IntelliScan NET Platinum)과 통신
-- [ ] 보드 기본 계정 비밀번호 변경 (`rock`/`rock` 그대로다)
+#### B. OS 빌드 방식(A/B/C)을 정한 뒤에 할 것
+
+> 위 "선행 결정: 최종 OS" 절 참고. **OS를 자체 빌드하는 방향은 확정**됐고, 유저랜드 방식만 남았다.
+
+- [ ] 빌드 환경 구축 + 첫 자체 이미지 부팅 (지금 CM3 IO 보드로 먼저)
+- [ ] 자체 보드용 디바이스트리 작성 (자체 보드 설계와 병행)
+- [ ] 제품 이미지에서 불필요한 것 제거 (아래 5.5-5 "제품 이미지 절차")
+- [ ] read-only rootfs + overlayfs
+- [ ] eMMC 이전 (7.3G. 6단계 착수 전)
+- [ ] `acu-netcfg`를 새 네트워크 스택에 맞추기 (B/C를 고르면 필수)
+- [ ] `Containerfile.build`의 베이스 이미지 교체
+
+#### C. 하드웨어 (기판 설계 시 반영 — [HARDWARE.md](HARDWARE.md) 체크리스트)
+
+- [ ] USB OTG0 커넥터 외부 노출 / 리커버리 버튼 / 상태 LED 3개 / I2C·OLED 풋프린트
+- [ ] wlan0을 끌지 결정 (제품은 이더넷 전용. 지금은 eth0 설정의 안전망이라 켜 둠)
 
 ### 5.5-5. 빌드/배포를 바이너리 전용으로 (2026-09-09 신설)
 
@@ -106,12 +195,28 @@ Ubuntu의 `gcc-aarch64-linux-gnu`로 빌드하면 glibc 2.43 심볼을 참조해
       (제품 이미지에는 당연히 미포함)
 - [ ] **webui는 크로스컴파일로 해결되지 않는다** — Flask `app.py`가 그 자체로 소스다.
       제품에 webui를 넣을지, 넣는다면 소스 노출을 어떻게 다룰지 별도 결정 필요
-- [ ] **제품 이미지 절차 정의** (7단계와 연계) — 2026-09-09 실측한 정리 대상:
-  - [ ] dev 패키지 제거 (`gcc`, `libc6-dev`, `*-dev`, `linux-libc-dev`, `manpages-dev`) — **약 24MB**
-  - [ ] XFCE 제거 + `systemctl set-default multi-user.target` — **약 26MB** (현재 `graphical.target`)
-  - [ ] 소스 트리 미포함 (빌드 머신 겸용을 그만두면 자동으로 해결)
+- [ ] **제품 이미지 절차 정의** — **OS 자체 빌드로 방향이 바뀌어, "지우기"가 아니라 "안 넣기"가 된다.**
+      아래는 지금 벤더 이미지에 무엇이 들어 있는지 실측한 것이다(2026-09-09). 자체 빌드 시
+      **이런 것들이 애초에 안 들어가야 한다**는 목록으로 읽을 것
+
+  | 들어 있는 것 | 크기 |
+  |---|---|
+  | codium | 337 MB |
+  | chromium-x11 | 221 MB |
+  | firefox-esr | 213 MB |
+  | firmware-iwlwifi | 111 MB |
+  | maliit-keyboard | 103 MB |
+  | fonts-noto-cjk | 87 MB |
+  | libllvm11 / libmali / mesa / GTK 계열 | 수백 MB |
+  | dev 패키지 (`gcc`, `libc6-dev`, `*-dev`, `linux-headers`) | 약 90 MB |
+
+  - 총 설치 패키지 **1,136개**. 우리 데몬이 실제로 필요한 것은 `libsqlite3-0`, `libcjson1`,
+    `libc6` 정도다(+ webui를 넣으면 python3)
+  - **앞서 "XFCE 26MB"라고 적었던 것은 틀렸다.** 이름에 `xfce`가 들어간 패키지만 센 값이었다
+  - [x] ~~`systemctl set-default multi-user.target`~~ -> 개발 보드에 적용함 (lightdm 중지)
+  - [ ] 패키지 제거는 **하지 않는다** — 자체 빌드 이미지에서 해결할 문제다
   - [ ] read-only rootfs + overlayfs
-  - **eMMC가 7.3G뿐이라 이 정리는 용량 문제이기도 하다** (위 eMMC 이전 항목과 연결)
+  - **eMMC 7.3G 안에 들어가야 한다** (위 eMMC 이전 항목과 연결)
 
 ### 5.5-1. 통신 안정성 (실제 PC를 붙이기 전 선행) — ✅ 완료 2026-09-08
 
@@ -248,7 +353,10 @@ Ubuntu의 `gcc-aarch64-linux-gnu`로 빌드하면 glibc 2.43 심볼을 참조해
 - [ ] 장치 타입 코드 확정 (현재 `0x29` 임시값) — PC가 어떤 타입을 기대하는지 확인
 - [ ] 이벤트 큐 영속화 (현재 32개 메모리 링버퍼, 재시작 시 유실)
 
-### 5.5-4. CM3 OS — **결정됨: Radxa 공식 Debian Bullseye (XFCE) b25**
+### 5.5-4. CM3 OS — Radxa Debian Bullseye (XFCE) b25 — **개발용으로만 사용**
+
+> **2026-09-09 갱신**: 제품 OS는 **자체 빌드**로 방향이 바뀌었다(위 "선행 결정" 절).
+> 아래는 지금 개발에 쓰고 있는 벤더 이미지에 대한 기록이다.
 
 ```
 /home/jayden/workspace/radxa/cm3/radxa-cm3-io_debian_bullseye_xfce_b25.img.xz   (1.1GB, xz 압축)
