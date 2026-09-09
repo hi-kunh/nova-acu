@@ -3,12 +3,13 @@
 ACU 프로젝트의 진행 상황과 남은 일 정리.
 완료된 단계의 **상세 기록은 [README.md](README.md)** 에 있고, 이 파일은 "무엇이 남았는지"만 관리한다.
 
-- 최종 갱신: 2026-09-08
+- 최종 갱신: 2026-09-09
 - 현재 위치: **5단계 완료 / 5.5단계(ACU 단독 개통) 진행 중** — RRU 개발보드가 오기 전까지
   **CM3 IO 보드에 acud를 올리고 PC(상위 시스템)와 TCP 통신을 개통**하는 것이 당면 작업.
   6단계(RRU 연동)는 하드웨어 확정 완료, 개발보드 구매 대기
-- **내일 시작 지점: 아래 "5.5-0. 내일 여기서 시작" 절의 명령부터.** 보드는 부팅·점검까지만 끝났고
-  **apt 조치와 타임존 변경은 아직 실행하지 않았다**
+- **2026-09-09: 보드 개통 1차 성공.** acud가 CM3 IO 보드에서 돌고, 개발 PC와 TCP로 상태 요청 응답 +
+  카드 이벤트 수신까지 확인했다. 상세는 [README.md](README.md) "보드 개통 성공 (2026-09-09)".
+  **다음 시작 지점: 아래 "5.5-0. 다음 여기서 시작" 절.**
 
 ---
 
@@ -22,7 +23,7 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 | 3 | config.json 감시 + 무중단 리로드(SIGHUP) | ✅ 완료 |
 | 4 | 웹 설정 인터페이스 (Flask) | 🔶 1차 범위만 (config 편집) |
 | 5 | 네트워크 통신부 (TCP, IDTi 프로토콜 V2) | 🔶 1차 범위만 (Event Log 응답) |
-| 5.5 | **ACU 단독 개통 (CM3 보드 + PC 통신)** | 🔶 진행 중 (아래 전용 절) |
+| 5.5 | **ACU 단독 개통 (CM3 보드 + PC 통신)** | 🔶 **개통 1차 성공 (2026-09-09)** / systemd·포트1004 남음 |
 | 6 | 실제 하드웨어 (USB, ACU↔RRU) | ⬜ 개발보드 대기 |
 | 7+ | 배포/운영 (systemd, 보안 강화 등) | ⬜ 미착수 |
 
@@ -47,54 +48,56 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
   소스 주석은 CP949 -> `iconv -f CP949 -t UTF-8` 로 볼 것.
   **문서에서 애매한 것은 이 소스를 근거로 삼는다.** 확인한 내용은 README "PC 소스에서 확인한 프로토콜 사실" 참고
 
-### 5.5-0. 내일 여기서 시작 (2026-09-09)
+### 5.5-0. 다음 여기서 시작 (2026-09-09 갱신)
 
-2026-09-08 기준 **보드는 부팅과 환경 점검까지만 끝났다.** 아래는 **아직 하나도 실행하지 않은 상태**다.
-원인 분석은 끝났으니(5.5-4 참고) 그대로 실행하면 된다.
+**개통 1차 성공까지 끝났다.** 아래 1~5번은 모두 완료. 상세 기록은 README 참고.
 
-**보드 접속**: `ssh rock@192.168.0.132` (wlan0. 개발 PC는 192.168.0.73으로 같은 대역)
+**보드 접속**: `ssh rock@192.168.0.132` (wlan0. 개발 PC는 192.168.0.73). SSH 키 인증 설정됨
 
-- [ ] **1. 타임존 변경** — 지금 UTC다. acud가 `localtime_r`로 이벤트 BCD 시각을 만들기 때문에
-      이대로면 PC에 9시간 어긋난 시각이 올라간다
-  ```bash
-  sudo timedatectl set-timezone Asia/Seoul
-  date
-  ```
+- [x] ~~1. 타임존 변경~~ -> **완료**. `Asia/Seoul` (KST, +0900), NTP 동기화 정상
+- [x] ~~2. apt 고치기~~ -> **완료**. 단 **앞선 조치안대로는 실패한다** — `bullseye-security`도 함께
+      비활성화해야 했다(풀의 .deb가 404). 아래 5.5-4의 갱신된 블록 참고
+- [x] ~~3. 빌드 의존성 설치~~ -> **완료**. `libsqlite3-dev`, `libcjson-dev`, `libc6-dev`
+      (헤더 2개면 된다는 판단은 틀렸다 — `libc6-dev`가 아예 없었다)
+- [x] ~~4. 저장소 복사 후 빌드~~ -> **완료**. `git clone`은 보드에 GitHub 키가 없어 실패 -> **rsync로 확정**
+      ```bash
+      # 개발 PC에서
+      rsync -av --exclude .git --exclude '__pycache__' ~/workspace/nova-acu/ rock@192.168.0.132:~/nova-acu/
+      ```
+      빌드는 경고 0개, `acud` ELF aarch64 PIE 39,520byte
+- [x] ~~5. PC에서 접속 확인~~ -> **완료. 개통 1차 성공**.
+      Firmware 상태 요청 548byte 응답, 카드 주입 -> 허용 판정 -> 이벤트 316byte 수신
 
-- [ ] **2. apt 고치기** — 원인은 `bullseye-security` Release 만료(2026-09-07 21:13 UTC)와
-      `bullseye-backports` 404. **`sources.list`의 URL은 건드리지 않는다**
-      (deb.debian.org는 아직 bullseye를 정상 서비스 중. archive.debian.org로 옮기면 오히려 security가 없다)
-  ```bash
-  sudo mv /etc/apt/sources.list.d/bullseye-backports.list \
-          /etc/apt/sources.list.d/bullseye-backports.list.disabled
+**다음 할 일 (우선순위 순)**
 
-  echo 'Acquire::Check-Valid-Until "false";' \
-      | sudo tee /etc/apt/apt.conf.d/99no-check-valid-until
+- [ ] **빌드/배포 방식을 바이너리 전용으로 전환** — 아래 5.5-5 (새 절). 제품 ACU에 소스와
+      툴체인이 남지 않게 하는 작업. 개통이 끝났으니 이제 착수할 시점이다
+- [ ] **5.5-2** 경로 절대화, systemd 유닛, 로그를 journald로
+- [ ] **5.5-3** 포트 1004 전환 후 실제 PC 프로그램(IntelliScan NET Platinum)과 통신
+- [ ] 보드 기본 계정 비밀번호 변경 (`rock`/`rock` 그대로다)
 
-  sudo apt update
-  ```
+### 5.5-5. 빌드/배포를 바이너리 전용으로 (2026-09-09 신설)
 
-- [ ] **3. 빌드 의존성 설치** — gcc/make/git/python3(3.9.2)/venv/pip3는 이미 있다. 헤더 2개만 있으면 된다
-  ```bash
-  sudo apt install -y libsqlite3-dev libcjson-dev
-  ```
+**배경**: 제품 ACU에는 소스코드도, 빌드 툴체인도 남아 있으면 안 된다. 지금은 개통을 우선하느라
+보드에서 네이티브 빌드했지만 이건 개발 단계 한정이다.
 
-- [ ] **4. 저장소 복사 후 빌드**
-  ```bash
-  git clone git@github.com:hi-kunh/nova-acu.git    # 또는 개발 PC에서 scp -r
-  cd nova-acu/acud && make && ./acud
-  ```
+**주의: 단순 크로스 컴파일은 그대로는 안 된다**
 
-- [ ] **5. PC(개발 PC)에서 접속 확인** — 여기까지 되면 **개통 1차 성공**
-  ```bash
-  # 개발 PC에서
-  python3 tools/idti_client.py --host 192.168.0.132 --request status   # Firmware 응답 548byte
-  python3 tools/idti_client.py --host 192.168.0.132                    # 이벤트 조회
-  # 보드에서 카드 주입
-  echo 04A1B2C3D4E5F600 > ~/nova-acu/acud/acud_mock.fifo
-  ```
+| | 개발 PC | 보드 |
+|---|---------|------|
+| OS | Ubuntu 26.04 | Debian 11 bullseye |
+| glibc | **2.43** | **2.31** |
 
-- [ ] **6. 그 다음** — 5.5-2(경로 절대화, systemd, 로그)와 5.5-3(포트 1004 전환) 진행
+Ubuntu의 `gcc-aarch64-linux-gnu`로 빌드하면 glibc 2.43 심볼을 참조해 보드에서 실행이 안 된다
+(`version 'GLIBC_2.3x' not found`). `-lsqlite3 -lcjson` 링크용 arm64 sysroot도 따로 필요하다.
+
+- [ ] **bullseye arm64 컨테이너 빌드 환경** (podman/docker + qemu-user-static). 타깃과 glibc·라이브러리가
+      정확히 일치하고, 그대로 CI/릴리스 절차가 된다. 개발 PC에는 podman/docker/qemu 모두 미설치 상태
+- [ ] 배포를 **`scp acud` 하나**로 좁히기 (현재는 rsync로 소스 전체를 밀고 있음)
+- [ ] `strip`으로 심볼 제거
+- [ ] **webui는 크로스컴파일로 해결되지 않는다** — Flask `app.py`가 그 자체로 소스다.
+      제품에 webui를 넣을지, 넣는다면 소스 노출을 어떻게 다룰지 별도 결정 필요
+- [ ] 제품 이미지 절차 정의 (7단계와 연계): gcc/make/git/`*-dev` 제거, read-only rootfs, 소스 미포함
 
 ### 5.5-1. 통신 안정성 (실제 PC를 붙이기 전 선행) — ✅ 완료 2026-09-08
 
@@ -108,10 +111,10 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 
 ### 5.5-2. 보드에 올리기 (다음 작업)
 
-- [ ] **OS 이미지 기록(flash) 및 첫 부팅** — 이미지는 결정됨, 아래 "5.5-4" 참고
-      (`xz -dk` 로 풀고 SD에 기록 -> 부팅 -> SSH 접속)
-- [ ] 빌드 방식 결정 — 보드에서 네이티브 빌드(권장) vs 개발 PC 크로스 컴파일
-- [ ] 보드에 의존성 설치 (`build-essential libsqlite3-dev libcjson-dev python3-venv`)
+- [x] ~~**OS 이미지 기록(flash) 및 첫 부팅**~~ -> **완료** (2026-09-08)
+- [x] ~~빌드 방식 결정~~ -> **개발 단계는 보드 네이티브 빌드**(2026-09-09 개통 완료).
+      **제품은 바이너리 전용 배포로 전환** — 5.5-5 절 참고
+- [x] ~~보드에 의존성 설치~~ -> **완료** (2026-09-09). `libsqlite3-dev libcjson-dev` (+`libc6-dev`)
 - [ ] **보드 네트워크** — 고정 IP(또는 DHCP 예약), PC에서 포트 도달 확인
   - 현재 상태(2026-09-08): **wlan0 = 192.168.0.132 (UP), eth0 = DOWN**.
     개발 PC(192.168.0.73)와 **같은 대역이라 지금 바로 통신 테스트가 가능**하다
@@ -176,14 +179,15 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
 | `cdc_acm` | **있음** (`cdc-acm.ko.xz`, 로더블 모듈) | RRU 연결 시 자동 로드 — 6단계 준비 완료. (`modinfo` 최초 실패는 `/usr/sbin`이 PATH에 없어서였음) |
 
 - [x] ~~이미지/커널/아키텍처 확인~~ (위 표)
-- [ ] **`sudo sh tools/board_check.sh` 실행** — 시각/네트워크/저장소/의존성/cdc_acm을 한 번에 확인하는
-      점검 스크립트를 만들어 뒀다 (읽기 전용). 출력으로 아래 항목들을 한꺼번에 판정할 수 있다
+- [x] ~~**`sudo sh tools/board_check.sh` 실행**~~ -> **개별 점검으로 대체 완료** (2026-09-09).
+      시각/네트워크/저장소/의존성/cdc_acm을 개통 과정에서 모두 직접 확인했다.
+      스크립트(`tools/board_check.sh`, 읽기 전용)는 다음 보드를 셋업할 때 쓰면 된다
 - [x] ~~`cdc_acm` 재확인~~ -> **있음 (2026-09-08 확인)**.
       `/lib/modules/5.10.160-18-rk356x/kernel/drivers/usb/class/cdc-acm.ko.xz`, alias `char-major-166-*`.
       로더블 모듈이라 RRU를 꽂으면 자동 로드된다. **6단계 USB 경로의 OS 쪽 준비는 끝**
 - [x] ~~시각 확인~~ -> **정상** (2026-09-08 10:04 UTC, 실제와 일치). NTP가 돌았다는 뜻이므로
       **네트워크도 살아 있을 가능성이 높다** -> apt 실패는 저장소 문제로 좁혀짐
-- [ ] **타임존을 Asia/Seoul로 변경** — 현재 **UTC**. 명령은 위 5.5-0의 1번 참고 (아직 미실행)
+- [x] ~~**타임존을 Asia/Seoul로 변경**~~ -> **완료** (2026-09-09). KST +0900, NTP 동기화 확인
 - [x] ~~`apt update` 실패 원인 확정~~ -> **원인 2개 확정 (2026-09-08, 저장소를 직접 조회해 확인)**
 
   | 저장소 | 상태 | 문제 |
@@ -197,30 +201,41 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
   -> **`deb.debian.org`는 아직 bullseye를 서비스하고 있다.** archive.debian.org로 옮길 필요 없음
      (오히려 archive에는 `debian-security/bullseye-security`가 없다)
 
-  **조치**:
+  **조치 — 2026-09-09 실행 결과 정정.** 위 분석대로 하면 **설치가 실패한다.**
+  `Check-Valid-Until`을 꺼서 security Release를 되살려도 **풀의 .deb가 이미 삭제돼 있고**
+  (`libc-dev-bin_..._deb11u14_arm64.deb` -> 404), apt가 모든 candidate를 security 버전으로 잡기 때문에
+  설치가 통째로 막힌다. **security 저장소도 비활성화해서 bullseye main 버전으로 떨어뜨려야 한다.**
   ```bash
   # 1) 사라진 backports 비활성화
   sudo mv /etc/apt/sources.list.d/bullseye-backports.list \
           /etc/apt/sources.list.d/bullseye-backports.list.disabled
 
-  # 2) 만료된 Release를 받아들이도록 설정 (security 저장소를 살려 두기 위함)
+  # 2) 풀이 비어 있는 security 저장소도 비활성화   <- 이것이 핵심
+  sudo mv /etc/apt/sources.list.d/bullseye-security.list \
+          /etc/apt/sources.list.d/bullseye-security.list.disabled
+
+  # 3) (있어도 무해) 만료 Release 허용
   echo 'Acquire::Check-Valid-Until "false";' \
       | sudo tee /etc/apt/apt.conf.d/99no-check-valid-until
 
   sudo apt update
-  sudo apt install -y build-essential libsqlite3-dev libcjson-dev python3-venv
+  sudo apt install -y libsqlite3-dev libcjson-dev
   ```
-  - `Check-Valid-Until`을 끄면 롤백 공격 방어가 약해지지만, EOL 배포판에서는 통상적인 처리다.
-    security 저장소를 아예 비활성화하는 선택지도 있으나 그러면 **이미 나와 있는 보안 수정분까지 못 받는다**
-  - 필요한 패키지는 bullseye main(arm64)에 다 있다:
-    `libsqlite3-dev 3.34.1-3`, `libcjson-dev 1.7.14-1+deb11u1`
+  - security를 끄는 것이 보안 후퇴로 보이지만 **그 저장소는 지금 설치 가능한 패키지를 하나도 제공하지
+    못한다**(전부 404). 실질적으로 잃는 것이 없다. 대신 **bullseye EOL이 확정 사실**임을 확인해 준 것이므로
+    제품용 배포판 재선정은 미룰 수 없다
+  - 실제 설치된 버전: `libsqlite3-dev 3.34.1-3`, `libcjson-dev 1.7.14-1+deb11u1`,
+    `libc6-dev 2.31-13+deb11u11`
+  - **`build-essential`/`python3-venv`는 설치하지 않았다** — gcc/make는 이미 있었고 acud 빌드에 불필요.
+    webui를 보드에서 띄울 때 `python3-venv`가 필요해질 수 있다
 - [ ] (예비) **apt가 끝내 안 되면 우회** — 데몬이 필요한 건 헤더 2개(`sqlite3.h`, `cJSON.h`)뿐이다.
       보드에는 이미 `libsqlite3.so.0`이 있고 gcc/make/git/python3(3.9.2)/venv/pip3도 깔려 있다.
       (a) arm64 `.deb`를 개발 PC에서 받아 `dpkg -i`, (b) 소스를 저장소에 vendoring,
       (c) 개발 PC에서 크로스 빌드해 바이너리만 복사. **apt가 죽어도 pip(PyPI)는 될 수 있으니
       웹UI는 별개로 판단할 것**
-- [ ] 기본 계정/비밀번호 (Radxa 이미지는 통상 `rock`/`rock`) -> **즉시 변경**
-- [ ] **의존성 설치** — `build-essential libsqlite3-dev libcjson-dev python3-venv`
+- [ ] 기본 계정/비밀번호 -> **`rock`/`rock` 그대로임을 2026-09-09 확인. 변경 필요**
+- [x] ~~**의존성 설치**~~ -> **완료** (2026-09-09). acud 빌드에는 `libsqlite3-dev libcjson-dev`면 충분했다.
+      webui를 보드에서 띄울 때 `python3-venv`가 추가로 필요
       (bullseye의 pip은 오래돼서 Flask 3.x 설치 전에 `pip install -U pip` 필요할 수 있음)
 - [ ] **XFCE 데스크톱 끄기** — 우리 제품은 headless다. `systemctl set-default multi-user.target`으로
       디스플레이 매니저를 내리면 메모리/부팅시간이 준다 (개발 중에는 켜 두고 써도 무방)
@@ -375,6 +390,12 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
       `8. System Device Reader Setup`, `10. Group`, `11. User General Group`, `13. Force OpenMode`,
       `14. Request Blocking User List` — 필요한 단계에서 확인
 - [ ] 루트의 `index.html` — 초기 커밋 잔재. 용도 확인 후 정리하거나 삭제
+- [ ] **보드의 radxa 저장소 GPG 키 만료** (2026-09-09 확인) — `radxa-repo.github.io`의 두 저장소가
+      `NO_PUBKEY 67A474DD40402951`, `NO_PUBKEY 5D93177D0752732A`로 서명 검증에 실패해 `apt update`가
+      에러를 낸다. 우리 패키지는 전부 Debian main에서 오므로 **빌드에는 영향 없음**.
+      커널/BSP 패키지를 apt로 갱신해야 할 때 문제가 된다
+- [ ] **Debian bullseye EOL 확정** — security 저장소의 .deb가 실제로 삭제된 것을 확인했다(404).
+      제품 출하용 배포판 재선정이 미룰 수 없는 과제가 됐다 (5.5-4 마지막 항목과 연결)
 
 ---
 

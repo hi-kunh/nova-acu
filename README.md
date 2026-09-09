@@ -466,6 +466,74 @@ PC가 접속 후 처음 보내는 명령에 응답하도록 했다. **개통의 
 | History + ExcludeDeviceStatus | 82byte | Header 44 + Event 36 + Tail 2 |
 | 미지원 오브젝트(0x2B) | 무응답 | 로그만 남기고 무시 (기존 동작 유지) |
 
+### 보드 개통 성공 (2026-09-09) — acud를 CM3 IO 보드에서 돌리고 PC와 통신 확인
+
+**결과: 개통 1차 성공.** 개발 PC -> 보드 TCP 접속, Firmware 상태 요청 응답, 카드 주입 -> 출입 판정 ->
+이벤트가 PC로 올라오는 것까지 전 경로가 실제 하드웨어에서 동작했다.
+
+| 단계 | 결과 |
+|------|------|
+| 타임존 | `Asia/Seoul` (KST, +0900), NTP 동기화됨 — 로그/이벤트 시각 정상 |
+| 의존성 설치 | `libsqlite3-dev 3.34.1-3`, `libcjson-dev 1.7.14-1+deb11u1` (+ `libc6-dev 2.31-13+deb11u11`) |
+| 네이티브 빌드 | `gcc -Wall -Wextra -std=c11 -O2` **경고 0개**. `acud` 39,520byte, ELF aarch64 PIE |
+| 실행 | 포트 9870 리스닝 확인 (`ss -lntp`) |
+| Firmware 상태 요청 | **548byte** 응답 — 개발 PC의 `tools/idti_client.py --request status` |
+| 카드 이벤트 | 카드 주입 -> `허용` 판정 -> 릴레이 3초 -> **316byte** 이벤트 응답 |
+
+**배포 방식: `git clone`이 아니라 `rsync`로 확정**
+
+보드에서 `git clone git@github.com:...`은 **실패한다** — 보드에 GitHub에 등록된 SSH 키가 없기 때문이다
+(`Permission denied (publickey)`). 배포키를 심는 대신 **개발 PC에서 밀어 넣는 방식**으로 정했다.
+
+```bash
+# 개발 PC에서
+rsync -av --exclude .git --exclude '__pycache__' ~/workspace/nova-acu/ rock@192.168.0.132:~/nova-acu/
+```
+
+보드에 git 자격증명을 심지 않아도 되고, **"제품 ACU에는 소스가 없어야 한다"는 방향과도 어긋나지 않는다.**
+보드는 개발 환경이 아니라 "잠깐 빌드하는 곳"이다. 다음 단계에서 이것을 **바이너리만 배포**로 좁힌다
+(TODO의 "빌드 방식" 항목 참고).
+
+**apt 문제 — 앞선 분석에서 두 가지가 틀렸다**
+
+2026-09-08에 세운 조치안대로 하면 설치가 **실패한다.** 실제로 해보고 확인한 것:
+
+| 앞선 판단 | 실제 |
+|-----------|------|
+| "`Check-Valid-Until`을 꺼서 **security 저장소를 살려 두자**" | **틀렸다.** Release는 살아나지만 **풀의 .deb가 삭제돼 있다**(`libc-dev-bin_2.31-13+deb11u14_arm64.deb` -> **404**). bullseye LTS가 2026-08-31에 끝나면서 아카이브에서 빠진 것. 게다가 apt는 모든 패키지의 candidate를 security 버전으로 잡기 때문에 **설치 자체가 통째로 막힌다** |
+| "헤더 2개(`sqlite3.h`, `cJSON.h`)만 있으면 된다" | **틀렸다.** `/usr/include/stdio.h`조차 없었다 — **`libc6-dev`가 아예 미설치**였다. gcc는 있어도 아무것도 컴파일 못 하는 상태. `libcjson`은 헤더는 물론 **런타임 `.so`도 없었다** |
+
+**실제로 먹힌 조치** (bullseye main 버전으로 떨어뜨리는 것이 핵심):
+
+```bash
+# 1) 사라진 backports 비활성화
+sudo mv /etc/apt/sources.list.d/bullseye-backports.list \
+        /etc/apt/sources.list.d/bullseye-backports.list.disabled
+
+# 2) 풀이 비어 있는 security 저장소도 비활성화  <- 이것이 핵심
+sudo mv /etc/apt/sources.list.d/bullseye-security.list \
+        /etc/apt/sources.list.d/bullseye-security.list.disabled
+
+# 3) (있어도 무해) 만료 Release 허용
+echo 'Acquire::Check-Valid-Until "false";' \
+    | sudo tee /etc/apt/apt.conf.d/99no-check-valid-until
+
+sudo apt update
+sudo apt install -y libsqlite3-dev libcjson-dev   # libc6-dev 등이 의존성으로 따라온다
+```
+
+security를 끄는 것이 보안상 후퇴로 보이지만, **지금 그 저장소는 설치 가능한 패키지를 하나도 제공하지
+못한다**(전부 404). 잃는 것이 실질적으로 없다. 다만 이것은 **bullseye가 EOL이라는 사실을 다시 확인해 준
+것**이므로, 제품 출하용 배포판 재선정은 미룰 수 없는 과제다.
+
+**미해결 (개통에는 지장 없음)**
+
+- **radxa 저장소 GPG 키 만료** — `radxa-repo.github.io`의 두 저장소가
+  `NO_PUBKEY 67A474DD40402951`, `NO_PUBKEY 5D93177D0752732A`로 서명 검증에 실패해
+  `apt update`가 에러를 낸다. 우리 패키지는 전부 Debian main에서 오므로 빌드에는 영향이 없다.
+  커널/BSP 패키지를 apt로 갱신해야 할 때 문제가 된다
+- **보드 계정이 아직 기본값**(`rock`/`rock`) — 변경 필요
+
 ## 빌드 & 실행
 
 ```bash
