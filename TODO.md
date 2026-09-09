@@ -252,9 +252,29 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
       webui를 보드에서 띄울 때 `python3-venv`가 추가로 필요
       (bullseye의 pip은 오래돼서 Flask 3.x 설치 전에 `pip install -U pip` 필요할 수 있음)
 - [ ] **XFCE 데스크톱 끄기** — 우리 제품은 headless다. `systemctl set-default multi-user.target`으로
-      디스플레이 매니저를 내리면 메모리/부팅시간이 준다 (개발 중에는 켜 두고 써도 무방)
-- [ ] **설치 매체 결정** — SD 부팅으로 먼저 개통하고, 제품은 eMMC로 갈지.
-      eMMC 기록은 USB-C OTG + maskrom(rkdeveloptool) 경로가 필요하다
+      디스플레이 매니저를 내리면 메모리/부팅시간이 준다.
+      **eMMC(7.3G) 이전의 선행 조건이기도 하다** — 패키지까지 제거하면 용량 여유가 크게 생긴다
+- [x] ~~**설치 매체 결정**~~ -> **당분간 SD 유지, eMMC 이전은 6단계(RRU 개발보드) 착수 전에** (2026-09-09 결정)
+
+  실물 확인 결과:
+
+  | 장치 | 정체 | 크기 | 상태 |
+  |------|------|------|------|
+  | `mmcblk0` | **SD 카드** (SP32G) | 29.7G | **부팅 중** — `/`, `/boot/efi`, `/config` |
+  | `mmcblk1` | **eMMC** (DG4008) | **7.3G** | **비어 있음** (파티션 없음) |
+
+  - **지금 SD로 계속하는 근거**: 진행 중인 작업(systemd 유닛, install.sh, 경로 절대화)은
+    **부팅 매체와 무관**하다. eMMC로 옮겨도 `install.sh`를 다시 돌리면 끝이라 재작업이 없다.
+    반면 eMMC 기록은 USB-C OTG + maskrom(`rkdeveloptool`) 경로가 필요해 개발 속도만 떨어진다.
+    SD는 망가뜨려도 다시 구우면 된다
+  - **끝까지 미루면 안 되는 이유**: **eMMC 7.3G vs SD 29.7G.** 현재 rootfs 사용량은 3.7G라
+    여유가 있지만, 30G 환경에서 개발하다 마지막에 7.3G에 안 들어가는 것을 발견하면 곤란하다.
+    지금 이미지에는 **XFCE 데스크톱이 통째로 들어 있다**(제품은 headless)
+  - **제품에는 eMMC가 필수다** — SD 카드는 진동/전원 차단/마모로 죽는다.
+    출입통제 장치가 SD 불량으로 멈추면 사고다
+- [ ] **eMMC 이전** — 6단계 착수 전에 수행. 실제 하드웨어 통합과 부팅 매체 디버깅을 동시에 하지 않기 위함
+  - [ ] rootfs를 7.3G 안에 넣기 (XFCE 제거가 핵심)
+  - [ ] USB-C OTG + maskrom + `rkdeveloptool` 경로 확보
 - [ ] 제품화 단계는 별도 결정 — read-only rootfs + overlayfs로 굳히기, 또는 Yocto/Buildroot로 축소.
       Bullseye가 이미 oldstable이라 **제품 출하 시점에는 배포판을 다시 정해야 할 가능성이 높다.**
       지금 코드가 배포판 고유 기능에 의존하지 않게만 해 두면 나중에 갈아탈 수 있다
