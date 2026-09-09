@@ -600,12 +600,51 @@ journald를 안 쓰는 환경을 위해 파일 출력도 되며, **SIGHUP 때 �
 
 **남은 것**
 
-- **eth0가 죽어 있다** — `NO-CARRIER`, `/sys/class/net/eth0/carrier = 0`. **케이블 미연결**이다.
-  제품은 이더넷을 쓰므로 케이블을 꽂고 다시 봐야 한다. 지금은 wlan0(192.168.0.132)로 통신 중
-- **eth0 MAC이 부팅마다 바뀐다** — `0a:96:73:bb:05:8b`는 locally-administered 랜덤 MAC이다
-  (RK3566에 MAC이 구워져 있지 않아 커널이 매번 만든다). **DHCP 예약도, PC 쪽 장치 식별도 깨진다.**
-  제품에서는 MAC을 고정해야 한다
 - 웹UI를 보드에 올릴지는 5.5-5(소스 노출)와 함께 결정
+
+### eth0 개통 + 부팅 지연 수정 (2026-09-09)
+
+케이블을 연결하고 확인한 결과와, 그 과정에서 드러난 유닛 결함 하나.
+
+**eth0 정상 동작**
+
+| 항목 | 값 |
+|------|-----|
+| 링크 | **1Gbps / Full**, PHY `RTL8211F` (`rk_gmac-dwmac fe010000.ethernet`) |
+| 주소 | **192.168.0.164/24** (DHCP), GW 192.168.0.1 |
+| 라우팅 | eth0 metric 100 < wlan0 metric 600 -> **eth0가 기본 경로** |
+| ACU 접속 | 개발 PC -> `192.168.0.164:1004` Firmware 548byte 응답 |
+
+**앞선 "MAC이 부팅마다 바뀐다"는 판단은 틀렸다.** `0a:` 접두사(locally-administered 비트)만 보고
+랜덤이라고 단정했는데, 실제로는 그렇지 않다.
+
+- `/sys/class/net/eth0/addr_assign_type` = **0 (`NET_ADDR_PERM`)** — 커널이 랜덤 생성한 것이 아니다
+  (랜덤이면 `eth_hw_addr_random()`이 1로 설정한다)
+- **재부팅 2회에도 `0a:96:73:bb:05:8b` 동일**. DHCP 임대도 그대로 유지돼 eth0가 다시 .164를 받았다
+- 다만 IEEE OUI가 등록된 주소는 아니다(로컬 관리 주소). 제품 출하 시 자체 OUI를 쓸지는 별도 판단이 필요하지만,
+  **DHCP 예약이나 장치 식별이 깨지는 문제는 없다**
+
+**부팅 후 acud가 46초 늦게 떴다 — 유닛 결함**
+
+재부팅으로 검증해 보니 `systemctl is-enabled`가 `enabled`인데도 부팅 직후에는 `inactive`였다.
+
+```
+부팅 15:14:46 -> acud 시작 15:15:32   (46초 지연)
+systemd-analyze blame:  38.508s NetworkManager-wait-online.service
+```
+
+원인은 유닛에 넣은 `Wants=network-online.target`이었다. **출입통제 장치가 정전 복구 후 46초 동안
+카드를 못 읽는 것은 받아들일 수 없다.** 게다가 이 데몬은 네트워크를 기다릴 이유가 없다 —
+`bind(0.0.0.0)`은 주소가 붙기 전에도 성공하고, `net_init`이 실패해도 출입 판정은 계속 돈다(fail-safe).
+
+`After=network-online.target` / `Wants=network-online.target` -> **`After=network.target`** 으로 바꿨다.
+
+```
+부팅 15:16:39 -> acud 시작 15:16:47   (8초)      46초 -> 8초
+```
+
+**교훈**: `systemctl is-enabled`가 `enabled`인 것은 "부팅 시 자동 시작된다"의 증거가 아니다.
+실제로 재부팅해 봐야 한다. 처음에 `enabled`만 보고 완료 처리했던 것이 이 결함을 덮고 있었다.
 
 ## 빌드 & 실행
 

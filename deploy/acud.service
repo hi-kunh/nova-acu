@@ -1,8 +1,13 @@
 [Unit]
 Description=ACU (Access Control Unit) daemon
 Documentation=https://github.com/hi-kunh/nova-acu
-After=network-online.target
-Wants=network-online.target
+#
+# network-online.target을 기다리지 않는다.
+# 기다리게 했더니 NetworkManager-wait-online(38.5초) 때문에 부팅 후 46초가 지나서야 떴다.
+# 출입통제 장치가 정전 복구 후 46초간 카드를 못 읽는 것은 받아들일 수 없다.
+# 이 데몬은 네트워크를 기다릴 이유가 없다 - bind(0.0.0.0)은 주소가 붙기 전에도 성공하고,
+# net_init이 실패해도 출입 판정은 계속 돈다(fail-safe).
+After=network.target
 
 [Service]
 Type=simple
