@@ -12,6 +12,11 @@ netmodule UDP 탐색 클라이언트 (PC 역할).
   python3 tools/nm_discover.py                # 2초 동안 탐색
   python3 tools/nm_discover.py --timeout 5
   python3 tools/nm_discover.py --raw          # 원본 바이트도 출력
+
+설정 변경(SETT)은 대상 장치의 MAC이 필요하다. FIND로 먼저 찾은 뒤 보낸다:
+
+  python3 tools/nm_discover.py --set 192.168.0.200/24 --gw 192.168.0.1
+  python3 tools/nm_discover.py --set ... --password 1234
 """
 
 import argparse
@@ -85,6 +90,37 @@ def parse_ack(data):
     return out
 
 
+# 설정 프레임 필드 오프셋 (discover.c의 표와 같아야 한다)
+OFF_COMMAND, OFF_MAC, OFF_TCP_MODE = 0, 4, 10
+OFF_IP, OFF_NETMASK, OFF_GATEWAY, OFF_PORT = 11, 15, 19, 23
+OFF_PW_SET_FLAG, OFF_PW_COMPANY, OFF_PW_CUSTOM = 49, 50, 54
+
+FRAME_LEN = 50
+FRAME_PW_LEN = 58
+
+
+def prefix_to_mask(prefix):
+    """prefix 길이를 4byte 넷마스크로 바꾼다."""
+    bits = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
+    return bytes((bits >> s) & 0xFF for s in (24, 16, 8, 0))
+
+
+def build_sett(mac_text, ip_text, prefix, gw_text, port, password):
+    """SETT 요청 58byte를 만든다. 대상 장치는 MAC으로 지목한다."""
+    f = bytearray(FRAME_PW_LEN)
+    f[OFF_COMMAND:OFF_COMMAND + 4] = b"SETT"
+    f[OFF_MAC:OFF_MAC + 6] = bytes(int(x, 16) for x in mac_text.split(":"))
+    f[OFF_TCP_MODE] = 2  # Server
+    f[OFF_IP:OFF_IP + 4] = bytes(int(x) for x in ip_text.split("."))
+    f[OFF_NETMASK:OFF_NETMASK + 4] = prefix_to_mask(prefix)
+    f[OFF_GATEWAY:OFF_GATEWAY + 4] = bytes(int(x) for x in gw_text.split("."))
+    f[OFF_PORT:OFF_PORT + 2] = struct.pack(">H", port)
+    f[OFF_PW_SET_FLAG] = 1
+    f[OFF_PW_COMPANY:OFF_PW_COMPANY + 4] = b"IDTi"
+    f[OFF_PW_CUSTOM:OFF_PW_CUSTOM + 4] = password.encode("ascii")[:4].ljust(4, b"\0")
+    return bytes(f)
+
+
 def show(info, addr, raw=None):
     print(f"[{info['command']}] {addr[0]}:{addr[1]} 에서 응답")
     print(f"  MAC         {info['mac']}")
@@ -110,7 +146,16 @@ def main():
     ap.add_argument("--target", default="255.255.255.255",
                     help="브로드캐스트 주소. 기본 255.255.255.255")
     ap.add_argument("--raw", action="store_true", help="원본 바이트도 출력")
+    ap.add_argument("--set", metavar="IP/PREFIX",
+                    help="설정 변경(SETT). 예: 192.168.0.200/24")
+    ap.add_argument("--gw", help="--set 과 함께 쓸 게이트웨이")
+    ap.add_argument("--port", type=int, default=1004, help="장치 TCP 수신 포트 (기본 1004)")
+    ap.add_argument("--password", default="0000", help="단말기 비밀번호 4자리 (기본 0000)")
+    ap.add_argument("--mac", help="대상 MAC. 생략하면 FIND로 찾은 장치를 쓴다")
     args = ap.parse_args()
+
+    if args.set and not args.gw:
+        ap.error("--set 을 쓰려면 --gw 도 필요하다")
 
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -148,7 +193,38 @@ def main():
         show(info, addr, data if args.raw else None)
 
     print(f"장치 {len(devices)}대 응답" + (f" (중복 응답 {dupes}건 무시)" if dupes else ""))
-    return 0 if devices else 2
+
+    if not args.set:
+        return 0 if devices else 2
+
+    # ---- 설정 변경 ----
+    target = args.mac or (next(iter(devices)) if devices else None)
+    if not target:
+        print("설정을 보낼 장치를 찾지 못했다", file=sys.stderr)
+        return 2
+
+    ip_text, _, prefix_text = args.set.partition("/")
+    prefix = int(prefix_text or 24)
+
+    frame = build_sett(target, ip_text, prefix, args.gw, args.port, args.password)
+    print(f"\nSETT -> {target} : {ip_text}/{prefix} gw={args.gw} ({len(frame)}byte)")
+    tx.sendto(frame, (args.target, PORT_BROADCAST))
+
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        try:
+            data, addr = rx.recvfrom(512)
+        except socket.timeout:
+            continue
+        info = parse_ack(data)
+        if info is None or info["command"] not in ("SETC", "FAIL"):
+            continue
+        verdict = "수락(SETC)" if info["command"] == "SETC" else "거절(FAIL)"
+        print(f"응답: {verdict} — {len(data)}byte")
+        return 0 if info["command"] == "SETC" else 3
+
+    print("SETT 응답 없음", file=sys.stderr)
+    return 4
 
 
 if __name__ == "__main__":

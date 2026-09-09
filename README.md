@@ -816,6 +816,89 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 **도구**: `tools/nm_discover.py` — PC 역할. `FIND`를 뿌리고 `IMIN`을 해석해 보여 준다
 (`--raw`로 원본 바이트, `--timeout`으로 수집 시간).
 
+### SETT(설정 변경) 구현 (2026-09-09) — UDP로 IP를 바꾼다
+
+탐색에 이어 `SETT`를 구현해, **기존 Device Manager로 우리 ACU의 IP를 바꿀 수 있게** 했다.
+
+**문제: acud는 네트워크를 직접 바꿀 수 없다**
+
+acud 유닛에는 `NoNewPrivileges=yes`가 걸려 있어 **sudo를 쓸 수 없다.** 그리고 그 하드닝은
+네트워크에서 들어온 패킷을 파싱하는 데몬에 꼭 필요하므로 풀 수 없다.
+
+그래서 역할을 나눴다.
+
+```
+PC --SETT(58byte)--> acud            검증(MAC/비밀번호/형식/대역) -> SETC 또는 FAIL
+                       |
+                       | /run/acud/netcfg-request 에 요청을 적는다 (임시파일+rename)
+                       v
+          acu-netcfg-apply.path (감시)
+                       |
+                       v
+          acu-netcfg-apply.service (root)  --> acu-netcfg apply-request
+                                                arping 충돌 검사 후 실제 적용
+```
+
+- **`SETC`는 "받아들였다"는 뜻**이지 "적용 완료"가 아니다. 원래 netmodule도 설정을 받고
+  재부팅하는 방식이라 적용 완료를 기다렸다 답하지 않는다. **PC는 다시 탐색해서 결과를 확인**한다
+- 요청 파일은 **임시 파일에 쓴 뒤 `rename`** 으로 갈아 끼운다. 감시자가 반쯤 쓰인 파일을 집어 가면 안 된다
+- 요청 파일은 읽자마자 지운다. 적용에 실패해도 같은 요청이 무한히 재시도되면 안 된다
+
+**검증은 두 곳에서 한다**
+
+| 검증 | 어디서 | 이유 |
+|------|--------|------|
+| 대상 MAC이 우리 것인가 | acud | PC는 MAC으로 장치를 지목한다. 남의 설정을 가로채면 안 된다 |
+| 비밀번호 | acud | Company `"IDTi"` 고정 + Custom = config의 `admin_password` |
+| IP/넷마스크/게이트웨이 형식·대역 | acud + acu-netcfg | acu-netcfg는 acud를 거치지 않고도 불릴 수 있다 |
+| **주소 충돌 (arping -D)** | acu-netcfg | ARP 검사는 raw 소켓이 필요해 acud 권한으로는 못 한다 |
+
+**webui와 달리 자동 롤백을 걸지 않는다.** webui는 주소가 바뀌면 브라우저가 길을 잃지만, 탐색은
+IP가 무엇이든 브로드캐스트로 장비를 다시 찾을 수 있다. 여기서 롤백을 걸면 PC는 성공(SETC)을 받았는데
+잠시 뒤 주소가 되돌아가 오히려 혼란스럽다. 대신 **충돌 검사는 그대로 한다.**
+
+반대로 **webui에서 확인 대기 중인 변경이 있으면 SETT를 적용하지 않는다.** 그대로 덮어쓰면
+잠시 뒤 롤백 타이머가 "이전 설정"을 되살리면서 방금 SETT로 넣은 값까지 날려 버린다.
+
+**아직 반영하지 않는 것: `RemotePort`** — SETT는 장치의 TCP 수신 포트도 실어 오는데, 그 값은
+config.json에 있고 config.json은 webui가 관리한다. acud가 여기서 덮어쓰면 webui의 편집과 충돌한다.
+조용히 무시하면 PC가 포트가 바뀐 줄 알고 접속에 실패하므로 **다르면 로그로 남긴다.**
+
+#### 검증 결과 (실제 보드)
+
+| 시나리오 | 결과 |
+|----------|------|
+| 비밀번호 불일치 | `FAIL` — "SETT 비밀번호가 맞지 않아 거절" |
+| 게이트웨이가 대역 밖 | `FAIL` — "게이트웨이가 IP 대역 밖이다" |
+| **이미 쓰는 IP(.73)** | acud는 `SETC`(ARP 검사 불가) -> **적용기가 ARP로 막음**, IP 안 바뀜, 요청 파일 정리됨 |
+| **정상 변경 .250 -> .251** | `SETC` -> 실제 적용됨. 재탐색 IMIN이 `.251` 보고, `.251:1004` TCP 정상 |
+| **.251 -> .250 복귀** | 정상 |
+| webui pending 중 SETT | acud는 `SETC`지만 **적용기가 거부** — IP는 webui 값(.252) 유지 |
+
+#### 코드 구조 (가독성)
+
+`discover.c`는 프레임 오프셋을 **하나의 표(enum)** 로 두고 만들 때와 읽을 때가 같은 표를 보게 했다.
+한쪽만 고쳐 어긋나는 것이 이런 바이너리 프로토콜에서 가장 흔한 버그다.
+
+```
+프로토콜 상수 / 오프셋 표
+작은 유틸        put_be16, get_be16, netmask_to_prefix, same_subnet
+장치 정보 읽기    read_mac, read_ipv4, read_gateway
+프레임 만들기     build_frame, send_reply, send_set_reply
+SETT 처리        sett_is_for_us, sett_password_ok, sett_validate,
+                sett_write_request, handle_sett
+공개 API        discover_init/shutdown/apply_config/fd/service/wait
+```
+
+`sett_validate()`는 거절 사유를 **문자열로 돌려준다** — 호출부가 그대로 로그에 쓰기 때문에
+"왜 거절됐는지"가 항상 로그에 남는다.
+
+**설정** — `config.json`에 선택 필드 `netcfg_request_path` 추가
+(기본 `/run/acud/netcfg-request`, **빈 문자열이면 SETT를 거절**한다).
+
+**도구** — `tools/nm_discover.py --set 192.168.0.200/24 --gw 192.168.0.1 [--password 0000]`.
+실제 절차대로 FIND로 MAC을 먼저 찾은 뒤 SETT를 보낸다.
+
 ## 빌드 & 실행
 
 ```bash

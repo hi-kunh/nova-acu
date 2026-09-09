@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch for network config requests from ACU UDP discovery
+# acud는 NoNewPrivileges=yes로 돌아 sudo를 쓸 수 없다. 그 하드닝은 네트워크에서 들어온
+# 입력을 파싱하는 데몬에 꼭 필요하므로 유지하고, 대신 acud가 남긴 요청 파일을
+# root로 도는 서비스가 집어 가 적용한다.
+
+[Path]
+PathExists=/run/acud/netcfg-request
+Unit=acu-netcfg-apply.service
+
+[Install]
+WantedBy=multi-user.target

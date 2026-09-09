@@ -17,38 +17,75 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+/* ------------------------------------------------------------------ */
+/* 프로토콜 상수 (PC 소스 islnetmodule에서 확인)                        */
+/* ------------------------------------------------------------------ */
+
 /*
- * netmodule 프로토콜 (PC 소스 islnetmodule에서 확인)
- *
  *   PC   -> 장치 : UDP 255.255.255.255 : 1460
  *   장치 -> PC   : UDP 255.255.255.255 : 5001
  *
- * 응답을 유니캐스트가 아니라 **브로드캐스트로 보내는 이유**: 장치 IP가 PC와 다른 대역에
- * 잘못 잡혀 있을 수 있다. 그게 바로 탐색이 필요한 상황이다. 유니캐스트로 답하면
+ * 응답을 유니캐스트가 아니라 브로드캐스트로 보내는 이유: 장치 IP가 PC와 다른 대역에
+ * 잘못 잡혀 있을 수 있고, 그게 바로 탐색이 필요한 상황이다. 유니캐스트로 답하면
  * 라우팅이 없어 나가지 못한다. 브로드캐스트는 인터페이스로 그냥 나간다.
  */
 #define NM_PORT_LISTEN 1460
 #define NM_PORT_REPLY  5001
 
-#define NM_CMD_LEN      4
-#define NM_FIND_REQ_LEN 4
-#define NM_FIND_ACK_LEN 50   /* IMIN */
-#define NM_SET_REQ_LEN  58   /* SETT = IMIN 50 + 비밀번호 4+4 */
-#define NM_SET_ACK_LEN  58   /* SETC / FAIL */
+#define NM_CMD_LEN       4
+#define NM_FRAME_LEN     50  /* FIND 응답(IMIN) 및 SETT의 앞부분 */
+#define NM_FRAME_PW_LEN  58  /* NM_FRAME_LEN + 비밀번호 4 + 4 */
+#define NM_FIND_REQ_LEN  4   /* "FIND" 네 글자가 전부 */
 
 #define NM_CMD_FIND "FIND"
 #define NM_CMD_IMIN "IMIN"
 #define NM_CMD_SETT "SETT"
+#define NM_CMD_SETC "SETC"
 #define NM_CMD_FAIL "FAIL"
 
 /* 수신 버퍼. 규격상 가장 긴 요청이 58byte라 넉넉하다 */
 #define NM_RECV_CAP 256
 
 /*
- * TcpMode: Client=0 / Mixed=1 / Server=2 (clsnmParams.NetworkMode).
- * 우리 ACU는 PC가 접속해 오는 서버다.
+ * 설정 프레임의 필드 오프셋.
+ * 프레임을 만들 때와 읽을 때가 **같은 표**를 보게 해서, 한쪽만 고쳐 어긋나는 일을 막는다.
+ * 순서/길이 근거는 clsnmSettingFrame.BuildBytesSetParams().
  */
+enum {
+    NM_OFF_COMMAND        = 0,   /* 4byte ASCII */
+    NM_OFF_MAC            = 4,   /* 6 */
+    NM_OFF_TCP_MODE       = 10,  /* 1 */
+    NM_OFF_IP             = 11,  /* 4  장치 자신의 IP (원문 이름은 RemoteIPAddress) */
+    NM_OFF_NETMASK        = 15,  /* 4 */
+    NM_OFF_GATEWAY        = 19,  /* 4 */
+    NM_OFF_PORT           = 23,  /* 2  빅엔디안 */
+    NM_OFF_PEER_IP        = 25,  /* 4  접속해 갈 상위 PC (우리는 서버라 사용 안 함) */
+    NM_OFF_PEER_PORT      = 29,  /* 2 */
+    NM_OFF_SERIAL_BPS     = 31,  /* 1 */
+    NM_OFF_SERIAL_DATABIT = 32,  /* 1 */
+    NM_OFF_SERIAL_PARITY  = 33,  /* 1 */
+    NM_OFF_SERIAL_STOPBIT = 34,  /* 1 */
+    NM_OFF_SERIAL_FLOW    = 35,  /* 1 */
+    NM_OFF_DP_CHAR        = 36,  /* 1 */
+    NM_OFF_DP_SIZE        = 37,  /* 2 */
+    NM_OFF_DP_TIME        = 39,  /* 2 */
+    NM_OFF_INACTIVITY     = 41,  /* 2 */
+    NM_OFF_DEBUG          = 43,  /* 1 */
+    NM_OFF_FIRMWARE       = 44,  /* 2  "주.부" */
+    NM_OFF_DHCP           = 46,  /* 1 */
+    NM_OFF_UDP            = 47,  /* 1 */
+    NM_OFF_CONNECT        = 48,  /* 1 */
+    NM_OFF_PW_SET_FLAG    = 49,  /* 1  Off=0 / On=1 */
+    NM_OFF_PW_COMPANY     = 50,  /* 4  SETT에만 있음. "IDTi" 고정 */
+    NM_OFF_PW_CUSTOM      = 54   /* 4  SETT에만 있음. 단말기 비밀번호 */
+};
+
+/* TcpMode: Client=0 / Mixed=1 / Server=2. 우리 ACU는 PC가 접속해 오는 서버다 */
 #define NM_TCPMODE_SERVER 2
+
+/* PasswordSetFlag가 On일 때만 PC가 비밀번호를 실어 보낸다 */
+#define NM_PW_FLAG_ON  1
+#define NM_PW_COMPANY  "IDTi"   /* clsnmSettingFrame의 asciiCompanyFixedPasswordValue */
 
 /*
  * Serial 계열 필드는 시리얼-이더넷 변환 모듈 시절의 잔재다. 우리는 시리얼을 쓰지 않으므로
@@ -65,19 +102,81 @@
 #define NM_FW_MAJOR 1
 #define NM_FW_MINOR 0
 
+/* 넷마스크로 받아들일 prefix 범위. acu-netcfg의 검증 범위와 맞춘다 */
+#define NM_PREFIX_MIN 8
+#define NM_PREFIX_MAX 30
+
 struct AcuDiscover {
-    int  fd;
-    int  tcp_port;
-    char iface[IFNAMSIZ];
-    unsigned ifindex; /* 0이면 인터페이스 필터를 걸지 않는다 */
+    int      fd;
+    int      tcp_port;
+    char     iface[IFNAMSIZ];
+    unsigned ifindex;                 /* 0이면 인터페이스 필터를 걸지 않는다 */
+    char     admin_password[8];       /* SETT 인증에 쓴다 (config의 admin_password) */
+    char     request_path[256];       /* SETT를 받아 적을 파일. 빈 문자열이면 SETT 거절 */
 };
 
-/* 값을 빅엔디안 2byte로 쓴다 (netmodule의 CalcByteLengthToByte와 동일) */
+/* ------------------------------------------------------------------ */
+/* 작은 유틸                                                           */
+/* ------------------------------------------------------------------ */
+
+/* 값을 빅엔디안 2byte로 쓴다 (netmodule의 CalcByteLengthToByte와 같은 순서) */
 static void put_be16(unsigned char *p, unsigned int v)
 {
     p[0] = (unsigned char)((v >> 8) & 0xFF);
     p[1] = (unsigned char)(v & 0xFF);
 }
+
+/* 빅엔디안 2byte를 읽는다 */
+static unsigned get_be16(const unsigned char *p)
+{
+    return ((unsigned)p[0] << 8) | (unsigned)p[1];
+}
+
+/* 4byte IPv4를 "a.b.c.d" 문자열로 만든다 */
+static void ip_to_text(const unsigned char ip[4], char *out, size_t cap)
+{
+    snprintf(out, cap, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+}
+
+/*
+ * 넷마스크 4byte를 prefix 길이로 바꾼다.
+ * 1이 앞쪽에 연속으로 몰려 있어야 유효하다 (255.255.0.255 같은 것은 거절).
+ * 유효하지 않으면 -1.
+ */
+static int netmask_to_prefix(const unsigned char mask[4])
+{
+    unsigned long m = ((unsigned long)mask[0] << 24) | ((unsigned long)mask[1] << 16) |
+                      ((unsigned long)mask[2] << 8)  | (unsigned long)mask[3];
+
+    int bits = 0;
+    while (bits < 32 && (m & (1UL << (31 - bits))))
+    {
+        bits++;
+    }
+
+    /* 남은 자리에 1이 하나라도 있으면 연속이 아니다 */
+    unsigned long rest = (bits == 32) ? 0UL : (m & ((1UL << (32 - bits)) - 1));
+    return (rest == 0) ? bits : -1;
+}
+
+/* 두 IPv4가 같은 prefix 대역에 있는지 본다 */
+static int same_subnet(const unsigned char a[4], const unsigned char b[4], int prefix)
+{
+    for (int i = 0; i < prefix; i++)
+    {
+        int byte = i / 8;
+        int bit  = 7 - (i % 8);
+        if (((a[byte] >> bit) & 1) != ((b[byte] >> bit) & 1))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 장치 정보 읽기                                                      */
+/* ------------------------------------------------------------------ */
 
 /* /sys/class/net/<iface>/address 에서 MAC 6byte를 읽는다. 실패하면 0으로 채우고 -1 */
 static int read_mac(const char *iface, unsigned char out[6])
@@ -156,7 +255,7 @@ static int read_ipv4(const char *iface, unsigned char ip[4], unsigned char mask[
  *
  * Gateway 열은 in_addr의 s_addr을 호스트 정수로 찍은 값이다. 리틀엔디안 기계에서
  * 0x0100A8C0은 메모리상 C0 A8 00 01 = 192.168.0.1 이 된다.
- * ARM64/x86 리눅스는 모두 리틀엔디안이므로 아래처럼 하위 바이트부터 꺼낸다.
+ * ARM64/x86 리눅스는 모두 리틀엔디안이므로 하위 바이트부터 꺼낸다.
  */
 static int read_gateway(const char *iface, unsigned char gw[4])
 {
@@ -202,15 +301,20 @@ static int read_gateway(const char *iface, unsigned char gw[4])
     return found;
 }
 
+/* ------------------------------------------------------------------ */
+/* 프레임 만들기                                                       */
+/* ------------------------------------------------------------------ */
+
 /*
- * 설정 프레임 50byte를 만든다. cmd4는 "IMIN" 또는 "FAIL" 같은 4byte 명령.
- * 필드 순서는 clsnmSettingFrame.BuildBytesSetParams()와 같다.
+ * 현재 장치 상태를 담은 설정 프레임 50byte를 만든다.
+ * cmd4는 "IMIN"(탐색 응답) / "SETC"(설정 성공) / "FAIL"(설정 거절) 중 하나.
  */
-static void build_setting_frame(const AcuDiscover *d, const char *cmd4, unsigned char out[NM_FIND_ACK_LEN])
+static void build_frame(const AcuDiscover *d, const char *cmd4, unsigned char out[NM_FRAME_LEN])
 {
-    memset(out, 0, NM_FIND_ACK_LEN);
+    memset(out, 0, NM_FRAME_LEN);
 
     unsigned char mac[6], ip[4], mask[4], gw[4];
+
     if (read_mac(d->iface, mac) != 0)
     {
         char w[160];
@@ -220,11 +324,11 @@ static void build_setting_frame(const AcuDiscover *d, const char *cmd4, unsigned
     if (read_ipv4(d->iface, ip, mask) != 0)
     {
         /*
-         * 조용히 0.0.0.0을 보고하면 PC 화면에는 장비가 보이는데 주소가 비어 있어
+         * 조용히 0.0.0.0을 보고하면 PC 화면에는 장비가 보이는데 주소만 비어 있어
          * 원인을 찾기 어렵다. getifaddrs()는 AF_NETLINK 소켓을 쓰므로, systemd 유닛의
          * RestrictAddressFamilies에 AF_NETLINK이 빠져 있으면 여기서 실패한다.
          */
-        char w[200];
+        char w[220];
         snprintf(w, sizeof(w),
                  "탐색: %s IPv4 주소를 읽지 못했다 (getifaddrs 실패) - 0.0.0.0으로 보고한다. "
                  "systemd RestrictAddressFamilies에 AF_NETLINK이 있는지 확인할 것", d->iface);
@@ -232,41 +336,29 @@ static void build_setting_frame(const AcuDiscover *d, const char *cmd4, unsigned
     }
     read_gateway(d->iface, gw);
 
-    size_t o = 0;
-    memcpy(out + o, cmd4, NM_CMD_LEN);          o += NM_CMD_LEN;   /* [0..3]   Command */
-    memcpy(out + o, mac, 6);                    o += 6;            /* [4..9]   MacAddress */
-    out[o++] = NM_TCPMODE_SERVER;                                  /* [10]     TcpMode */
-    memcpy(out + o, ip, 4);                     o += 4;            /* [11..14] RemoteIP (장치 자신) */
-    memcpy(out + o, mask, 4);                   o += 4;            /* [15..18] SubnetMask */
-    memcpy(out + o, gw, 4);                     o += 4;            /* [19..22] GateWay */
-    put_be16(out + o, (unsigned)d->tcp_port);   o += 2;            /* [23..24] RemotePort */
-    o += 4;                                                        /* [25..28] PeerIP - 서버라 없음(0) */
-    o += 2;                                                        /* [29..30] PeerPort */
-    out[o++] = NM_SERIAL_BPS_115200;                               /* [31]     SerialBPS */
-    out[o++] = NM_SERIAL_DATABIT;                                  /* [32]     Databit */
-    out[o++] = NM_SERIAL_PARITY;                                   /* [33]     Parity */
-    out[o++] = NM_SERIAL_STOPBIT;                                  /* [34]     Stopbit */
-    out[o++] = NM_SERIAL_FLOW;                                     /* [35]     Flow */
-    o += 1;                                                        /* [36]     DatapackingChar */
-    o += 2;                                                        /* [37..38] DatapackingSize */
-    o += 2;                                                        /* [39..40] DatapackingTime */
-    o += 2;                                                        /* [41..42] InactivityTime */
-    o += 1;                                                        /* [43]     SerialDebugMode */
-    out[o++] = NM_FW_MAJOR;                                        /* [44..45] FirmwareVersion */
-    out[o++] = NM_FW_MINOR;
-    o += 1;                                                        /* [46]     DhcpMode (0=고정) */
-    o += 1;                                                        /* [47]     UdpMode */
-    o += 1;                                                        /* [48]     Connect */
-    o += 1;                                                        /* [49]     PasswordSetFlag */
+    memcpy(out + NM_OFF_COMMAND, cmd4, NM_CMD_LEN);
+    memcpy(out + NM_OFF_MAC, mac, 6);
+    out[NM_OFF_TCP_MODE] = NM_TCPMODE_SERVER;
+    memcpy(out + NM_OFF_IP, ip, 4);
+    memcpy(out + NM_OFF_NETMASK, mask, 4);
+    memcpy(out + NM_OFF_GATEWAY, gw, 4);
+    put_be16(out + NM_OFF_PORT, (unsigned)d->tcp_port);
+    /* PeerIP/PeerPort는 0. 우리는 서버라 접속해 갈 대상이 없다 */
 
-    /* 위 오프셋이 규격과 어긋나면 PC가 엉뚱하게 해석한다 */
-    if (o != NM_FIND_ACK_LEN)
-    {
-        log_msg("탐색: 내부 오류 - 응답 프레임 길이가 50byte가 아니다");
-    }
+    out[NM_OFF_SERIAL_BPS]     = NM_SERIAL_BPS_115200;
+    out[NM_OFF_SERIAL_DATABIT] = NM_SERIAL_DATABIT;
+    out[NM_OFF_SERIAL_PARITY]  = NM_SERIAL_PARITY;
+    out[NM_OFF_SERIAL_STOPBIT] = NM_SERIAL_STOPBIT;
+    out[NM_OFF_SERIAL_FLOW]    = NM_SERIAL_FLOW;
+
+    out[NM_OFF_FIRMWARE]     = NM_FW_MAJOR;
+    out[NM_OFF_FIRMWARE + 1] = NM_FW_MINOR;
+
+    /* 비밀번호를 요구한다는 표시. 이게 0이면 PC가 비밀번호를 실어 보내지 않는다 */
+    out[NM_OFF_PW_SET_FLAG] = NM_PW_FLAG_ON;
 }
 
-/* 255.255.255.255:5001 로 브로드캐스트 응답 */
+/* 255.255.255.255:5001 로 브로드캐스트 응답을 보낸다 */
 static void send_reply(const AcuDiscover *d, const unsigned char *buf, size_t len)
 {
     struct sockaddr_in to;
@@ -275,8 +367,7 @@ static void send_reply(const AcuDiscover *d, const unsigned char *buf, size_t le
     to.sin_port = htons(NM_PORT_REPLY);
     to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 
-    ssize_t n = sendto(d->fd, buf, len, 0, (struct sockaddr *)&to, sizeof(to));
-    if (n < 0)
+    if (sendto(d->fd, buf, len, 0, (struct sockaddr *)&to, sizeof(to)) < 0)
     {
         char line[160];
         snprintf(line, sizeof(line), "탐색: 응답 전송 실패 (%s)", strerror(errno));
@@ -284,7 +375,238 @@ static void send_reply(const AcuDiscover *d, const unsigned char *buf, size_t le
     }
 }
 
-AcuDiscover *discover_init(const char *iface, int tcp_port)
+/* 설정 요청에 대한 응답(SETC 또는 FAIL) 58byte를 보낸다 */
+static void send_set_reply(const AcuDiscover *d, const char *cmd4)
+{
+    unsigned char ack[NM_FRAME_PW_LEN];
+    memset(ack, 0, sizeof(ack));
+    build_frame(d, cmd4, ack); /* 앞 50byte만 채우고 비밀번호 8byte는 0으로 둔다 */
+    send_reply(d, ack, sizeof(ack));
+}
+
+/* ------------------------------------------------------------------ */
+/* SETT (설정 변경) 처리                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * SETT가 우리에게 온 것인지 본다.
+ * PC는 MAC으로 장치를 지목하므로, 다른 장치 앞으로 온 브로드캐스트는 우리가 답하면 안 된다.
+ */
+static int sett_is_for_us(const AcuDiscover *d, const unsigned char *req)
+{
+    unsigned char mine[6];
+    if (read_mac(d->iface, mine) != 0)
+    {
+        return 0; /* 내 MAC을 모르면 남의 것인지 판단할 수 없다 - 답하지 않는다 */
+    }
+    return memcmp(req + NM_OFF_MAC, mine, 6) == 0;
+}
+
+/*
+ * SETT의 비밀번호를 검증한다. 맞으면 0.
+ * Company는 "IDTi" 고정이고, Custom은 config.json의 admin_password와 맞춰 본다
+ * (둘 다 "단말기 비밀번호" 개념이라 같은 값을 쓴다).
+ */
+static int sett_password_ok(const AcuDiscover *d, const unsigned char *req)
+{
+    if (memcmp(req + NM_OFF_PW_COMPANY, NM_PW_COMPANY, 4) != 0)
+    {
+        return -1;
+    }
+
+    char custom[5];
+    memcpy(custom, req + NM_OFF_PW_CUSTOM, 4);
+    custom[4] = '\0';
+
+    return (strncmp(custom, d->admin_password, 4) == 0) ? 0 : -1;
+}
+
+/*
+ * SETT가 실어 온 네트워크 설정이 쓸 만한지 본다.
+ * 문제가 없으면 NULL, 있으면 거절 사유 문자열을 돌려준다 (로그에 그대로 쓴다).
+ * prefix는 넷마스크에서 계산해 out_prefix로 넘긴다.
+ */
+static const char *sett_validate(const unsigned char *req, int *out_prefix)
+{
+    const unsigned char *ip   = req + NM_OFF_IP;
+    const unsigned char *mask = req + NM_OFF_NETMASK;
+    const unsigned char *gw   = req + NM_OFF_GATEWAY;
+
+    if (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0)
+    {
+        return "IP가 0.0.0.0이다";
+    }
+    if (ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255)
+    {
+        return "IP가 브로드캐스트 주소다";
+    }
+
+    int prefix = netmask_to_prefix(mask);
+    if (prefix < 0)
+    {
+        return "넷마스크가 연속된 비트가 아니다";
+    }
+    if (prefix < NM_PREFIX_MIN || prefix > NM_PREFIX_MAX)
+    {
+        return "넷마스크 범위가 /8~/30을 벗어난다";
+    }
+    if (memcmp(ip, gw, 4) == 0)
+    {
+        return "IP와 게이트웨이가 같다";
+    }
+    if (!same_subnet(ip, gw, prefix))
+    {
+        return "게이트웨이가 IP 대역 밖이다";
+    }
+
+    *out_prefix = prefix;
+    return NULL;
+}
+
+/*
+ * 적용할 설정을 요청 파일에 적는다. 성공하면 0.
+ *
+ * acud는 직접 네트워크를 바꾸지 않는다. 유닛에 NoNewPrivileges=yes가 걸려 있어 sudo를 쓸 수 없고,
+ * 그 하드닝은 네트워크에서 들어온 입력을 파싱하는 데몬에 꼭 필요하다.
+ * 대신 요청을 파일로 남기면 root로 도는 acu-netcfg-apply.path/service가 집어 가 적용한다
+ * (거기서 arping 충돌 검사까지 한다).
+ *
+ * 부분적으로 쓰인 파일을 감시자가 집어 가면 안 되므로 임시 파일에 쓰고 rename으로 갈아 끼운다.
+ */
+static int sett_write_request(const AcuDiscover *d, const unsigned char *req, int prefix)
+{
+    char ip[16], gw[16];
+    ip_to_text(req + NM_OFF_IP, ip, sizeof(ip));
+    ip_to_text(req + NM_OFF_GATEWAY, gw, sizeof(gw));
+
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", d->request_path);
+
+    FILE *fp = fopen(tmp, "w");
+    if (!fp)
+    {
+        char line[400];
+        snprintf(line, sizeof(line), "탐색: 요청 파일을 쓰지 못했다 (%s: %s)", tmp, strerror(errno));
+        log_msg(line);
+        return -1;
+    }
+
+    /*
+     * SETT 프레임에는 DNS 필드가 없다(시리얼-이더넷 모듈에는 필요 없었다).
+     * 로컬 네트워크에서는 게이트웨이가 DNS를 겸하는 것이 보통이라 게이트웨이를 쓴다.
+     */
+    fprintf(fp, "ip=%s\nprefix=%d\ngateway=%s\ndns=%s\n", ip, prefix, gw, gw);
+    int bad = (fflush(fp) != 0);
+    fclose(fp);
+
+    if (bad || rename(tmp, d->request_path) != 0)
+    {
+        char line[400];
+        snprintf(line, sizeof(line), "탐색: 요청 파일 교체 실패 (%s)", strerror(errno));
+        log_msg(line);
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * SETT 한 건을 처리하고 SETC 또는 FAIL로 답한다.
+ * 우리 앞으로 온 것이 아니면 아무것도 하지 않는다(다른 장치의 설정을 가로채면 안 된다).
+ */
+static void handle_sett(AcuDiscover *d, const unsigned char *req, const char *who)
+{
+    char line[300];
+
+    if (!sett_is_for_us(d, req))
+    {
+        return; /* 다른 장치 앞으로 온 브로드캐스트 */
+    }
+
+    if (d->request_path[0] == '\0')
+    {
+        log_msg("탐색: SETT를 받았으나 요청 파일 경로가 없어 거절한다");
+        send_set_reply(d, NM_CMD_FAIL);
+        return;
+    }
+
+    if (sett_password_ok(d, req) != 0)
+    {
+        snprintf(line, sizeof(line), "탐색: SETT 비밀번호가 맞지 않아 거절 (%s)", who);
+        log_msg(line);
+        send_set_reply(d, NM_CMD_FAIL);
+        return;
+    }
+
+    int prefix = 0;
+    const char *why = sett_validate(req, &prefix);
+    if (why)
+    {
+        snprintf(line, sizeof(line), "탐색: SETT 거절 - %s (%s)", why, who);
+        log_msg(line);
+        send_set_reply(d, NM_CMD_FAIL);
+        return;
+    }
+
+    if (sett_write_request(d, req, prefix) != 0)
+    {
+        send_set_reply(d, NM_CMD_FAIL);
+        return;
+    }
+
+    /*
+     * SETT는 장치의 TCP 수신 포트(RemotePort)도 실어 온다. 그런데 그 값은 config.json에 있고
+     * config.json은 webui가 관리한다. acud가 여기서 config.json을 덮어쓰면 webui의 편집과
+     * 충돌하므로 아직 반영하지 않는다. 조용히 무시하면 PC는 포트가 바뀐 줄 알고 접속에 실패하니
+     * 다르면 로그로 남긴다.
+     */
+    unsigned want_port = get_be16(req + NM_OFF_PORT);
+    if (want_port != (unsigned)d->tcp_port)
+    {
+        snprintf(line, sizeof(line),
+                 "탐색: SETT가 TCP 포트 %u를 요청했지만 포트 변경은 아직 지원하지 않는다 "
+                 "(현재 %d 유지). config.json에서 바꿀 것", want_port, d->tcp_port);
+        log_msg(line);
+    }
+
+    char ip[16];
+    ip_to_text(req + NM_OFF_IP, ip, sizeof(ip));
+    snprintf(line, sizeof(line),
+             "탐색: SETT 수락 (%s) -> %s/%d 적용 요청. 실제 적용과 충돌 검사는 acu-netcfg가 한다",
+             who, ip, prefix);
+    log_msg(line);
+
+    /*
+     * SETC는 "받아들였다"는 뜻이다. 원래 모듈도 설정을 받고 재부팅하는 방식이라
+     * 적용 완료를 기다렸다 답하지 않는다. PC는 다시 탐색해서 결과를 확인하면 된다.
+     */
+    send_set_reply(d, NM_CMD_SETC);
+}
+
+/* ------------------------------------------------------------------ */
+/* 공개 API                                                            */
+/* ------------------------------------------------------------------ */
+
+/* cfg의 값들을 내부 상태에 옮겨 담는다. 인터페이스가 바뀌면 인덱스를 다시 찾는다 */
+static void load_config(AcuDiscover *d, const AcuConfig *cfg)
+{
+    snprintf(d->iface, sizeof(d->iface), "%s",
+             (cfg->net_iface[0] != '\0') ? cfg->net_iface : "eth0");
+    snprintf(d->admin_password, sizeof(d->admin_password), "%s", cfg->admin_password);
+    snprintf(d->request_path, sizeof(d->request_path), "%s", cfg->netcfg_request_path);
+    d->tcp_port = cfg->tcp_port;
+
+    d->ifindex = if_nametoindex(d->iface);
+    if (d->ifindex == 0)
+    {
+        char w[160];
+        snprintf(w, sizeof(w), "탐색: %s 인터페이스를 찾지 못했다 - 모든 인터페이스에 응답한다", d->iface);
+        log_msg(w);
+    }
+}
+
+/* UDP 1460 수신 소켓을 열고 탐색을 시작한다. 실패하면 NULL */
+AcuDiscover *discover_init(const AcuConfig *cfg)
 {
     AcuDiscover *d = calloc(1, sizeof(*d));
     if (!d)
@@ -292,8 +614,7 @@ AcuDiscover *discover_init(const char *iface, int tcp_port)
         return NULL;
     }
 
-    snprintf(d->iface, sizeof(d->iface), "%s", (iface && iface[0]) ? iface : "eth0");
-    d->tcp_port = tcp_port;
+    load_config(d, cfg);
 
     d->fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (d->fd < 0)
@@ -313,21 +634,14 @@ AcuDiscover *discover_init(const char *iface, int tcp_port)
 
     /*
      * 어느 인터페이스로 들어온 요청인지 알기 위해 필요하다.
-     * 보드에 eth0와 wlan0가 같은 대역에 함께 떠 있으면 브로드캐스트가 양쪽으로 들어와
-     * 한 번의 FIND에 여러 번 답하게 된다. 우리는 eth0 설정을 보고하므로 eth0로 들어온 것만 답한다.
+     * eth0와 wlan0가 같은 대역에 함께 떠 있으면 브로드캐스트가 양쪽으로 들어와
+     * 한 번의 FIND에 여러 번 답하게 된다. 우리는 한 인터페이스의 설정을 보고하므로
+     * 그 인터페이스로 들어온 것만 답한다.
      * (SO_BINDTODEVICE는 CAP_NET_RAW가 필요해 쓰지 않는다)
      */
     if (setsockopt(d->fd, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on)) != 0)
     {
         log_msg("탐색: IP_PKTINFO 설정 실패 - 인터페이스 구분 없이 응답한다");
-    }
-
-    d->ifindex = if_nametoindex(d->iface);
-    if (d->ifindex == 0)
-    {
-        char w[160];
-        snprintf(w, sizeof(w), "탐색: %s 인터페이스를 찾지 못했다 - 모든 인터페이스에 응답한다", d->iface);
-        log_msg(w);
     }
 
     struct sockaddr_in addr;
@@ -346,7 +660,7 @@ AcuDiscover *discover_init(const char *iface, int tcp_port)
         return NULL;
     }
 
-    char line[160];
+    char line[200];
     snprintf(line, sizeof(line),
              "탐색(UDP) 시작 - %s 정보를 포트 %d에서 대기, 응답은 브로드캐스트 %d",
              d->iface, NM_PORT_LISTEN, NM_PORT_REPLY);
@@ -354,6 +668,7 @@ AcuDiscover *discover_init(const char *iface, int tcp_port)
     return d;
 }
 
+/* 소켓을 닫고 자원을 반납한다 */
 void discover_shutdown(AcuDiscover *d)
 {
     if (!d)
@@ -367,19 +682,25 @@ void discover_shutdown(AcuDiscover *d)
     free(d);
 }
 
+/* SIGHUP으로 설정이 바뀌었을 때 반영한다 (소켓은 그대로 쓴다) */
+void discover_apply_config(AcuDiscover *d, const AcuConfig *cfg)
+{
+    if (d)
+    {
+        load_config(d, cfg);
+    }
+}
+
+/* select()에 넣을 수신 fd */
 int discover_fd(const AcuDiscover *d)
 {
     return d ? d->fd : -1;
 }
 
-void discover_set_tcp_port(AcuDiscover *d, int tcp_port)
-{
-    if (d)
-    {
-        d->tcp_port = tcp_port;
-    }
-}
-
+/*
+ * 요청 한 건을 받아 처리한다.
+ * 우리가 설정을 보고하는 인터페이스로 들어온 것만 다루고, 나머지는 조용히 버린다.
+ */
 void discover_service(AcuDiscover *d)
 {
     if (!d)
@@ -388,17 +709,17 @@ void discover_service(AcuDiscover *d)
     }
 
     unsigned char buf[NM_RECV_CAP];
-    struct sockaddr_in from;
     unsigned char cmsgbuf[256];
+    struct sockaddr_in from;
 
     struct iovec iov = { .iov_base = buf, .iov_len = sizeof(buf) };
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
-    msg.msg_name = &from;
-    msg.msg_namelen = sizeof(from);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsgbuf;
+    msg.msg_name       = &from;
+    msg.msg_namelen    = sizeof(from);
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = cmsgbuf;
     msg.msg_controllen = sizeof(cmsgbuf);
 
     ssize_t n = recvmsg(d->fd, &msg, 0);
@@ -407,7 +728,6 @@ void discover_service(AcuDiscover *d)
         return; /* 너무 짧으면 우리 프로토콜이 아니다 */
     }
 
-    /* 우리가 설정을 보고하는 인터페이스로 들어온 요청만 처리한다 */
     if (d->ifindex != 0)
     {
         unsigned in_ifindex = 0;
@@ -423,7 +743,7 @@ void discover_service(AcuDiscover *d)
         }
         if (in_ifindex != 0 && in_ifindex != d->ifindex)
         {
-            return; /* 다른 인터페이스로 들어온 브로드캐스트 - 조용히 버린다 */
+            return; /* 다른 인터페이스로 들어온 브로드캐스트 */
         }
     }
 
@@ -432,31 +752,19 @@ void discover_service(AcuDiscover *d)
 
     if (n == NM_FIND_REQ_LEN && memcmp(buf, NM_CMD_FIND, NM_CMD_LEN) == 0)
     {
-        unsigned char ack[NM_FIND_ACK_LEN];
-        build_setting_frame(d, NM_CMD_IMIN, ack);
+        unsigned char ack[NM_FRAME_LEN];
+        build_frame(d, NM_CMD_IMIN, ack);
         send_reply(d, ack, sizeof(ack));
 
         char line[160];
-        snprintf(line, sizeof(line), "탐색: FIND 수신 (%s) -> IMIN %d byte 응답", who, NM_FIND_ACK_LEN);
+        snprintf(line, sizeof(line), "탐색: FIND 수신 (%s) -> IMIN %d byte 응답", who, NM_FRAME_LEN);
         log_msg(line);
         return;
     }
 
-    if (n == NM_SET_REQ_LEN && memcmp(buf, NM_CMD_SETT, NM_CMD_LEN) == 0)
+    if (n == NM_FRAME_PW_LEN && memcmp(buf, NM_CMD_SETT, NM_CMD_LEN) == 0)
     {
-        /*
-         * 설정 변경은 아직 구현하지 않았다. 무응답으로 두면 PC가 타임아웃까지 기다리므로
-         * FAIL로 명확히 답한다. FAIL 응답도 58byte(설정 프레임 50 + 비밀번호 8)다.
-         */
-        unsigned char ack[NM_SET_ACK_LEN];
-        memset(ack, 0, sizeof(ack));
-        build_setting_frame(d, NM_CMD_FAIL, ack);
-        send_reply(d, ack, sizeof(ack));
-
-        char line[200];
-        snprintf(line, sizeof(line),
-                 "탐색: SETT 수신 (%s) - 설정 변경은 미구현이라 FAIL로 응답", who);
-        log_msg(line);
+        handle_sett(d, buf, who);
         return;
     }
 
@@ -465,6 +773,7 @@ void discover_service(AcuDiscover *d)
     log_msg(line);
 }
 
+/* TCP 서버 없이 도는 동안 탐색만 기다린다 (최대 timeout_ms) */
 void discover_wait(AcuDiscover *d, int timeout_ms)
 {
     if (!d || d->fd < 0)
@@ -477,7 +786,7 @@ void discover_wait(AcuDiscover *d, int timeout_ms)
     FD_SET(d->fd, &rfds);
 
     struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_sec  = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
     if (select(d->fd + 1, &rfds, NULL, NULL, &tv) > 0 && FD_ISSET(d->fd, &rfds))

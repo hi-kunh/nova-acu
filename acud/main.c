@@ -192,7 +192,7 @@ int main(int argc, char **argv)
     AcuNet *net = net_init(cfg.tcp_port); /* 실패해도 net=NULL로 계속 진행 (출입 판정은 네트워크 없이도 동작) */
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
-    AcuDiscover *disc = discover_init(cfg.net_iface, cfg.tcp_port);
+    AcuDiscover *disc = discover_init(&cfg);
     if (net && disc)
     {
         net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
@@ -257,7 +257,6 @@ int main(int argc, char **argv)
                         if (disc)
                         {
                             net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
-                            discover_set_tcp_port(disc, new_cfg.tcp_port);
                         }
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");
                     }
@@ -267,32 +266,9 @@ int main(int argc, char **argv)
                         new_cfg.tcp_port = cfg.tcp_port;
                     }
                 }
-                if (strcmp(new_cfg.net_iface, cfg.net_iface) != 0)
-                {
-                    /* 탐색이 보고할 인터페이스가 바뀌었다. 소켓은 그대로 두고 대상만 바꾸면 되므로
-                     * 재생성이 필요하다 (iface는 discover_init에서 정해진다) */
-                    AcuDiscover *new_disc = discover_init(new_cfg.net_iface, new_cfg.tcp_port);
-                    if (new_disc)
-                    {
-                        if (net)
-                        {
-                            net_set_aux_reader(net, -1, NULL, NULL);
-                        }
-                        discover_shutdown(disc);
-                        disc = new_disc;
-                        if (net)
-                        {
-                            net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
-                        }
-                        log_msg("탐색 인터페이스 변경 적용됨");
-                    }
-                    else
-                    {
-                        log_msg("새 인터페이스로 탐색 소켓 열기 실패 -> 기존 유지");
-                        snprintf(new_cfg.net_iface, sizeof(new_cfg.net_iface), "%s", cfg.net_iface);
-                    }
-                }
                 cfg = new_cfg;
+                /* 인터페이스/포트/비밀번호 등 탐색이 보는 값들을 한 번에 반영한다 */
+                discover_apply_config(disc, &cfg);
                 log_msg("설정 리로드 완료");
             }
             else

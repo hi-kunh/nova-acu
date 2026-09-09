@@ -11,6 +11,7 @@
 #   acu-netcfg apply <ip> <prefix> <gw> <dns> <sec> 적용 + <sec>초 뒤 자동 롤백 예약
 #   acu-netcfg confirm                              예약된 롤백을 취소한다(설정 확정)
 #   acu-netcfg rollback                             즉시 이전 설정으로 되돌린다
+#   acu-netcfg apply-request <파일>                 UDP 탐색(SETT)이 남긴 요청을 읽어 적용한다
 #
 # apply는 반드시 confirm이 뒤따라야 한다. confirm이 없으면 <sec>초 뒤 자동으로 되돌아간다.
 # 확인 창 도중에 전원이 나가도 부팅 시 acu-netcfg-boot.service가 되돌린다.
@@ -148,6 +149,68 @@ cmd_apply() {
     echo "$secs초 안에 새 주소로 접속해 confirm 하지 않으면 자동으로 되돌아간다"
 }
 
+#
+# UDP 탐색(SETT)이 남긴 요청 파일을 읽어 적용한다.
+#
+# acud는 직접 네트워크를 바꾸지 못한다 - 유닛에 NoNewPrivileges=yes가 걸려 있어 sudo를 못 쓰고,
+# 그 하드닝은 네트워크 입력을 파싱하는 데몬에 꼭 필요하다. 그래서 acud는 요청을 파일로 남기고,
+# root로 도는 acu-netcfg-apply.service가 이 명령을 부른다.
+#
+# **webui와 달리 자동 롤백을 걸지 않는다.** webui는 주소가 바뀌면 브라우저가 길을 잃지만,
+# 탐색은 IP가 무엇이든 브로드캐스트로 장비를 다시 찾을 수 있다. 여기서 롤백을 걸면
+# PC는 성공(SETC)을 받았는데 잠시 뒤 주소가 되돌아가 오히려 혼란스럽다.
+# 대신 충돌 검사(arping -D)는 그대로 한다.
+#
+cmd_apply_request() {
+    file="$1"
+    [ -f "$file" ] || die "요청 파일이 없다: $file"
+
+    ip_addr=""; prefix=""; gw=""; dns=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ip)      ip_addr="$value" ;;
+            prefix)  prefix="$value" ;;
+            gateway) gw="$value" ;;
+            dns)     dns="$value" ;;
+        esac
+    done < "$file"
+
+    # 요청 파일을 먼저 지운다. 적용에 실패해도 같은 요청이 무한히 재시도되면 안 된다
+    rm -f "$file"
+
+    #
+    # webui에서 적용하고 아직 확인하지 않은 변경이 있으면 손대지 않는다.
+    # 그대로 덮어쓰면 잠시 뒤 롤백 타이머가 "이전 설정"을 되살리면서
+    # 방금 SETT로 넣은 값까지 날려 버린다.
+    #
+    [ -f "$PENDING" ] && die "webui에서 확인 대기 중인 변경이 있다 - SETT를 적용하지 않는다"
+
+    [ -n "$ip_addr" ] && [ -n "$prefix" ] && [ -n "$gw" ] || die "요청 파일에 빠진 항목이 있다"
+    [ -n "$dns" ] || dns="$gw"
+
+    # acud가 이미 검증했지만 여기서도 본다. 이 명령은 acud를 거치지 않고도 불릴 수 있다
+    is_ipv4 "$ip_addr" || die "IP 형식이 잘못됐다: $ip_addr"
+    is_ipv4 "$gw"      || die "게이트웨이 형식이 잘못됐다: $gw"
+    echo "$prefix" | grep -Eq '^[0-9]+$' || die "prefix가 숫자가 아니다: $prefix"
+    [ "$prefix" -ge 8 ] && [ "$prefix" -le 30 ] || die "prefix는 8~30이어야 한다: $prefix"
+    [ "$ip_addr" != "$gw" ] || die "IP와 게이트웨이가 같다"
+    same_subnet "$ip_addr" "$gw" "$prefix" || die "게이트웨이 $gw 가 $ip_addr/$prefix 대역 밖이다"
+
+    check_conflict "$ip_addr"
+
+    name=$(conn_name)
+    [ -n "$name" ] || die "$IFACE 에 활성 연결이 없다"
+
+    nmcli connection modify "$name" \
+        ipv4.method manual \
+        ipv4.addresses "$ip_addr/$prefix" \
+        ipv4.gateway "$gw" \
+        ipv4.dns "$dns"
+    nmcli connection up "$name" >/dev/null
+
+    echo "UDP 탐색 요청 적용됨: $ip_addr/$prefix gw=$gw dns=$dns"
+}
+
 cmd_confirm() {
     [ -f "$PENDING" ] || die "확인 대기 중인 변경이 없다"
     systemctl stop "$ROLLBACK_UNIT.timer" 2>/dev/null || true
@@ -185,7 +248,9 @@ case "${1:-}" in
     check)    [ $# -eq 2 ] || die "사용법: acu-netcfg check <ip>"; check_conflict "$2" ;;
     apply)    [ $# -eq 6 ] || die "사용법: acu-netcfg apply <ip> <prefix> <gw> <dns> <sec>"
               cmd_apply "$2" "$3" "$4" "$5" "$6" ;;
+    apply-request) [ $# -eq 2 ] || die "사용법: acu-netcfg apply-request <파일>"
+              cmd_apply_request "$2" ;;
     confirm)  cmd_confirm ;;
     rollback) cmd_rollback ;;
-    *)        die "사용법: acu-netcfg {show|check|apply|confirm|rollback}" ;;
+    *)        die "사용법: acu-netcfg {show|check|apply|apply-request|confirm|rollback}" ;;
 esac

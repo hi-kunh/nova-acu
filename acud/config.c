@@ -16,6 +16,7 @@
 #define ACU_DEFAULT_PID_PATH "acud.pid"
 #define ACU_DEFAULT_LOG_PATH ""   /* 빈 문자열 = stdout */
 #define ACU_DEFAULT_NET_IFACE "eth0"
+#define ACU_DEFAULT_NETCFG_REQUEST_PATH "/run/acud/netcfg-request"
 
 void config_set_defaults(AcuConfig *cfg)
 {
@@ -26,6 +27,8 @@ void config_set_defaults(AcuConfig *cfg)
     snprintf(cfg->pid_path, sizeof(cfg->pid_path), "%s", ACU_DEFAULT_PID_PATH);
     snprintf(cfg->log_path, sizeof(cfg->log_path), "%s", ACU_DEFAULT_LOG_PATH);
     snprintf(cfg->net_iface, sizeof(cfg->net_iface), "%s", ACU_DEFAULT_NET_IFACE);
+    snprintf(cfg->netcfg_request_path, sizeof(cfg->netcfg_request_path), "%s",
+             ACU_DEFAULT_NETCFG_REQUEST_PATH);
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -104,6 +107,8 @@ int config_load(const char *path, AcuConfig *cfg)
     const cJSON *pid_path = cJSON_GetObjectItemCaseSensitive(root, "pid_path");
     const cJSON *log_path = cJSON_GetObjectItemCaseSensitive(root, "log_path");
     const cJSON *net_iface = cJSON_GetObjectItemCaseSensitive(root, "net_iface");
+    const cJSON *netcfg_request_path =
+        cJSON_GetObjectItemCaseSensitive(root, "netcfg_request_path");
 
     if (!cJSON_IsString(db_path) || db_path->valuestring[0] == '\0')
     {
@@ -167,6 +172,18 @@ int config_load(const char *path, AcuConfig *cfg)
     else
     {
         snprintf(cfg->net_iface, sizeof(cfg->net_iface), "%s", ACU_DEFAULT_NET_IFACE);
+    }
+
+    /* 빈 문자열 자체가 "SETT를 받지 않는다"는 유효한 값이다 */
+    if (cJSON_IsString(netcfg_request_path))
+    {
+        snprintf(cfg->netcfg_request_path, sizeof(cfg->netcfg_request_path), "%s",
+                 netcfg_request_path->valuestring);
+    }
+    else
+    {
+        snprintf(cfg->netcfg_request_path, sizeof(cfg->netcfg_request_path), "%s",
+                 ACU_DEFAULT_NETCFG_REQUEST_PATH);
     }
 
     cJSON_Delete(root);

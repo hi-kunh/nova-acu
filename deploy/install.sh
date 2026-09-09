@@ -63,6 +63,11 @@ if [ -f "$NETCFG_SRC" ]; then
     install -m 0755 "$NETCFG_SRC" /usr/local/sbin/acu-netcfg
     install -m 0644 "$(dirname "$0")/acu-netcfg-boot.service" \
             /etc/systemd/system/acu-netcfg-boot.service
+    # UDP 탐색(SETT)이 남긴 요청을 root로 집어 가 적용하는 감시자
+    install -m 0644 "$(dirname "$0")/acu-netcfg-apply.path" \
+            /etc/systemd/system/acu-netcfg-apply.path
+    install -m 0644 "$(dirname "$0")/acu-netcfg-apply.service" \
+            /etc/systemd/system/acu-netcfg-apply.service
     # sudoers는 문법 오류가 나면 sudo 자체가 막히므로 반드시 검사 후 설치한다
     TMP_SUDO=$(mktemp)
     cp "$(dirname "$0")/sudoers-acu-netcfg" "$TMP_SUDO"
@@ -75,6 +80,7 @@ if [ -f "$NETCFG_SRC" ]; then
     rm -f "$TMP_SUDO"
     systemctl daemon-reload
     systemctl enable acu-netcfg-boot.service >/dev/null 2>&1 || true
+    systemctl enable --now acu-netcfg-apply.path >/dev/null 2>&1 || true
 
     if ! command -v arping >/dev/null 2>&1; then
         echo "참고: arping이 없다. IP 충돌 검사를 위해 'apt install iputils-arping' 권장" >&2
