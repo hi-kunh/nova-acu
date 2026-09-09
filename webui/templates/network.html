@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>ACU 네트워크 설정</title>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+    label { display: block; margin-top: 16px; font-weight: bold; }
+    input { width: 100%; padding: 6px; box-sizing: border-box; margin-top: 4px; }
+    button { margin-top: 20px; padding: 8px 16px; }
+    .hint { color: #666; font-size: 0.85em; margin-top: 2px; }
+    .flash { padding: 8px 12px; margin-top: 12px; border-radius: 4px; }
+    .flash.success { background: #dff0d8; color: #3c763d; }
+    .flash.warning { background: #fcf8e3; color: #8a6d3b; }
+    .flash.error   { background: #f2dede; color: #a94442; }
+    .cur { background: #f5f5f5; padding: 10px 12px; border-radius: 4px; font-size: 0.9em; }
+    .cur dt { font-weight: bold; float: left; width: 9em; clear: left; }
+    .cur dd { margin: 0 0 4px 9em; font-family: monospace; }
+    .pending { background: #fcf8e3; color: #8a6d3b; border: 1px solid #e0d6a8;
+               padding: 12px; border-radius: 4px; margin-top: 16px; }
+    .danger { color: #a94442; }
+  </style>
+</head>
+<body>
+  <h1>네트워크 설정</h1>
+  <p class="hint">
+    <a href="{{ url_for('index') }}">데몬 설정</a>
+    &middot; <a href="{{ url_for('logout') }}">로그아웃</a>
+  </p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  {% if info %}
+    <dl class="cur">
+      <dt>인터페이스</dt><dd>{{ info.iface }}</dd>
+      <dt>방식</dt><dd>{{ info.method }}</dd>
+      <dt>현재 주소</dt><dd>{{ info.current or '(없음)' }}</dd>
+      <dt>게이트웨이</dt><dd>{{ info.gateway or '(없음)' }}</dd>
+      <dt>DNS</dt><dd>{{ info.dns or '(없음)' }}</dd>
+    </dl>
+
+    {% if info.pending %}
+      <div class="pending">
+        <strong>확인 대기 중입니다.</strong><br>
+        방금 적용한 설정이 아직 확정되지 않았습니다. 이 화면이 보인다는 것은
+        새 주소로 접속에 성공했다는 뜻이므로, 아래 <b>확정</b>을 누르세요.<br>
+        확정하지 않으면 <b>{{ seconds }}초</b> 안에 이전 설정으로 자동 복구됩니다.
+        <form method="post" action="{{ url_for('network_confirm') }}">
+          <button type="submit">이 설정으로 확정</button>
+        </form>
+        <form method="post" action="{{ url_for('network_rollback') }}">
+          <button type="submit" class="danger">지금 이전 설정으로 되돌리기</button>
+        </form>
+      </div>
+    {% endif %}
+
+    <form method="post">
+      <label for="ip">IP 주소</label>
+      <input type="text" id="ip" name="ip"
+             value="{{ (info.current or '').split('/')[0] }}" required>
+
+      <label for="prefix">넷마스크 비트 (prefix, 8~30)</label>
+      <input type="number" id="prefix" name="prefix" min="8" max="30"
+             value="{{ (info.current or '/24').split('/')[1] if '/' in (info.current or '') else 24 }}" required>
+      <div class="hint">24 = 255.255.255.0</div>
+
+      <label for="gateway">게이트웨이</label>
+      <input type="text" id="gateway" name="gateway" value="{{ info.gateway }}" required>
+
+      <label for="dns">DNS (쉼표로 여러 개)</label>
+      <input type="text" id="dns" name="dns" value="{{ info.dns }}">
+
+      <button type="submit">적용 (확인 없으면 {{ seconds }}초 뒤 자동 복구)</button>
+      <div class="hint">
+        적용 전에 <b>ARP 중복 주소 감지</b>로 그 주소를 쓰는 장비가 있는지 먼저 확인합니다.
+        (ping만으로는 방화벽이 켜진 PC를 놓칠 수 있습니다)
+      </div>
+    </form>
+  {% else %}
+    <p class="flash error">네트워크 정보를 읽을 수 없습니다.</p>
+  {% endif %}
+</body>
+</html>

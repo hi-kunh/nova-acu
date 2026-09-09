@@ -1,0 +1,191 @@
+#!/bin/sh
+#
+# acu-netcfg - ACU 네트워크 설정 헬퍼 (root 전용)
+#
+# 화면도 키보드도 없는 장치라 IP를 webui로 바꿔야 하는데, 잘못 넣으면 복구할 방법이 없다.
+# 그래서 webui가 직접 nmcli를 부르지 않고 이 스크립트만 sudo로 부르게 한다.
+# webui 자체는 root가 아니고, 여기서 검증과 롤백을 책임진다.
+#
+#   acu-netcfg show                                 현재 설정을 JSON으로 출력
+#   acu-netcfg check <ip>                           주소 충돌 검사만 수행
+#   acu-netcfg apply <ip> <prefix> <gw> <dns> <sec> 적용 + <sec>초 뒤 자동 롤백 예약
+#   acu-netcfg confirm                              예약된 롤백을 취소한다(설정 확정)
+#   acu-netcfg rollback                             즉시 이전 설정으로 되돌린다
+#
+# apply는 반드시 confirm이 뒤따라야 한다. confirm이 없으면 <sec>초 뒤 자동으로 되돌아간다.
+# 확인 창 도중에 전원이 나가도 부팅 시 acu-netcfg-boot.service가 되돌린다.
+#
+set -eu
+
+IFACE=eth0
+STATE_DIR=/var/lib/acud/netcfg
+BACKUP="$STATE_DIR/backup.nmconnection"
+PENDING="$STATE_DIR/pending"
+ROLLBACK_UNIT=acu-netcfg-rollback
+
+die() { echo "$1" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "root로 실행해야 한다"
+
+# eth0에 붙어 있는 NetworkManager 프로필 이름을 찾는다 (이름을 고정하지 않는다 -
+# 이미지마다 "Wired connection 1"이 아닐 수 있다)
+conn_name() {
+    nmcli -t -g NAME,DEVICE connection show --active 2>/dev/null \
+        | awk -F: -v d="$IFACE" '$2==d {print $1; exit}'
+}
+
+conn_file() {
+    name="$1"
+    nmcli -t -g NAME,FILENAME connection show 2>/dev/null \
+        | awk -F: -v n="$name" '$1==n {sub("^"n":",""); print; exit}'
+}
+
+is_ipv4() {
+    echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+    # 각 옥텟이 0~255인지
+    echo "$1" | awk -F. '{for(i=1;i<=4;i++) if($i<0||$i>255) exit 1}'
+}
+
+# ip를 32비트 정수로
+ip2int() { echo "$1" | awk -F. '{printf "%u", $1*16777216+$2*65536+$3*256+$4}'; }
+
+# awk의 비트연산은 이식성이 나빠서, 블록 크기로 나눠 네트워크 주소를 구한다
+same_subnet() {
+    a=$(ip2int "$1"); b=$(ip2int "$2"); p="$3"
+    blk=$(awk -v p="$p" 'BEGIN{printf "%u", 2^(32-p)}')
+    na=$(awk -v x="$a" -v k="$blk" 'BEGIN{printf "%u", int(x/k)*k}')
+    nb=$(awk -v x="$b" -v k="$blk" 'BEGIN{printf "%u", int(x/k)*k}')
+    [ "$na" = "$nb" ]
+}
+
+# 이미 그 주소를 쓰는 장비가 있는지 본다.
+# ping이 아니라 arping -D(중복 주소 감지)를 먼저 쓴다 - 방화벽이 켜진 PC나 프린터는
+# ICMP를 버리지만 ARP에는 반드시 응답하기 때문에 ping만으로는 "비었다"고 오판한다.
+# 지금 우리가 쓰고 있는 주소라면 검사하지 않는다(자기 자신과 충돌할 리 없다).
+check_conflict() {
+    want="$1"
+    cur=$(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
+    if [ "$want" = "$cur" ]; then
+        echo "현재 이 장치가 쓰는 주소다 - 충돌 검사 생략"
+        return 0
+    fi
+
+    if command -v arping >/dev/null 2>&1; then
+        if arping -D -I "$IFACE" -c 3 -w 4 "$want" >/dev/null 2>&1; then
+            :
+        else
+            die "$want 는 이미 다른 장비가 쓰고 있다 (ARP 응답 있음)"
+        fi
+    else
+        echo "경고: arping이 없어 ARP 검사를 건너뛴다 (iputils-arping 설치 권장)" >&2
+    fi
+
+    # 보조 검사. ARP를 통과해도 라우팅 너머에서 응답하는 경우를 잡는다
+    if ping -c 1 -W 1 -I "$IFACE" "$want" >/dev/null 2>&1; then
+        die "$want 가 ping에 응답한다 - 이미 사용 중이다"
+    fi
+
+    echo "$want 사용 가능"
+}
+
+cmd_show() {
+    name=$(conn_name)
+    [ -n "$name" ] || die "$IFACE 에 활성 연결이 없다"
+    method=$(nmcli -t -g ipv4.method connection show "$name")
+    addrs=$(nmcli -t -g ipv4.addresses connection show "$name")
+    gw=$(nmcli -t -g ipv4.gateway connection show "$name")
+    dns=$(nmcli -t -g ipv4.dns connection show "$name")
+    cur=$(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}')
+    pending=false
+    [ -f "$PENDING" ] && pending=true
+    printf '{"iface":"%s","conn":"%s","method":"%s","addresses":"%s","gateway":"%s","dns":"%s","current":"%s","pending":%s}\n' \
+        "$IFACE" "$name" "$method" "$addrs" "$gw" "$dns" "$cur" "$pending"
+}
+
+cmd_apply() {
+    ip_addr="$1"; prefix="$2"; gw="$3"; dns="$4"; secs="$5"
+
+    is_ipv4 "$ip_addr" || die "IP 형식이 잘못됐다: $ip_addr"
+    is_ipv4 "$gw"      || die "게이트웨이 형식이 잘못됐다: $gw"
+    echo "$prefix" | grep -Eq '^[0-9]+$' || die "prefix가 숫자가 아니다: $prefix"
+    [ "$prefix" -ge 8 ] && [ "$prefix" -le 30 ] || die "prefix는 8~30이어야 한다: $prefix"
+    echo "$secs" | grep -Eq '^[0-9]+$' || die "롤백 시간이 숫자가 아니다: $secs"
+    [ "$secs" -ge 30 ] && [ "$secs" -le 600 ] || die "롤백 시간은 30~600초여야 한다: $secs"
+    [ "$ip_addr" != "$gw" ] || die "IP와 게이트웨이가 같다"
+    same_subnet "$ip_addr" "$gw" "$prefix" || die "게이트웨이 $gw 가 $ip_addr/$prefix 대역 밖이다"
+    for d in $(echo "$dns" | tr ',' ' '); do
+        is_ipv4 "$d" || die "DNS 형식이 잘못됐다: $d"
+    done
+
+    [ -f "$PENDING" ] && die "확인 대기 중인 변경이 이미 있다. confirm 하거나 롤백을 기다려라"
+
+    check_conflict "$ip_addr"
+
+    name=$(conn_name)
+    [ -n "$name" ] || die "$IFACE 에 활성 연결이 없다"
+    file=$(conn_file "$name")
+    [ -n "$file" ] && [ -f "$file" ] || die "연결 프로필 파일을 찾을 수 없다: $name"
+
+    mkdir -p "$STATE_DIR"
+    chmod 0700 "$STATE_DIR"
+    cp -a "$file" "$BACKUP"
+    printf '%s\n' "$file" > "$PENDING"
+    chmod 0600 "$BACKUP" "$PENDING"
+
+    # 되돌릴 준비를 먼저 걸어 둔다. 적용하다 접속이 끊겨도 타이머는 살아 있다
+    systemctl stop "$ROLLBACK_UNIT.timer" 2>/dev/null || true
+    systemd-run --unit="$ROLLBACK_UNIT" --on-active="$secs" \
+        /usr/local/sbin/acu-netcfg rollback >/dev/null
+
+    nmcli connection modify "$name" \
+        ipv4.method manual \
+        ipv4.addresses "$ip_addr/$prefix" \
+        ipv4.gateway "$gw" \
+        ipv4.dns "$dns"
+    nmcli connection up "$name" >/dev/null
+
+    echo "적용됨: $ip_addr/$prefix gw=$gw dns=$dns"
+    echo "$secs초 안에 새 주소로 접속해 confirm 하지 않으면 자동으로 되돌아간다"
+}
+
+cmd_confirm() {
+    [ -f "$PENDING" ] || die "확인 대기 중인 변경이 없다"
+    systemctl stop "$ROLLBACK_UNIT.timer" 2>/dev/null || true
+    systemctl reset-failed "$ROLLBACK_UNIT.service" 2>/dev/null || true
+    rm -f "$PENDING" "$BACKUP"
+    echo "설정을 확정했다"
+}
+
+cmd_rollback() {
+    [ -f "$PENDING" ] || { echo "되돌릴 변경이 없다"; exit 0; }
+    file=$(cat "$PENDING")
+    if [ -f "$BACKUP" ]; then
+        # 프로필 파일을 되돌리는 것이 본질이다. 이것만 되면 다음 부팅에는 옛 설정으로 뜬다.
+        cp -a "$BACKUP" "$file"
+        chmod 0600 "$file"
+
+        # 아래 nmcli는 "지금 당장" 반영하기 위한 것이라 실패해도 된다.
+        # 부팅 경로(acu-netcfg-boot.service)에서는 NetworkManager가 아직 안 떠 있어 반드시 실패한다.
+        # set -e 때문에 여기서 죽으면 pending 플래그가 남아 이후 IP 변경이 영영 거부되므로 반드시 감싼다.
+        nmcli connection reload >/dev/null 2>&1 || true
+        name=$(conn_name || true)
+        if [ -n "$name" ]; then
+            nmcli connection up "$name" >/dev/null 2>&1 || true
+        fi
+        echo "이전 설정으로 되돌렸다"
+    else
+        echo "백업이 없어 되돌리지 못했다" >&2
+    fi
+    systemctl stop "$ROLLBACK_UNIT.timer" 2>/dev/null || true
+    rm -f "$PENDING" "$BACKUP"
+}
+
+case "${1:-}" in
+    show)     cmd_show ;;
+    check)    [ $# -eq 2 ] || die "사용법: acu-netcfg check <ip>"; check_conflict "$2" ;;
+    apply)    [ $# -eq 6 ] || die "사용법: acu-netcfg apply <ip> <prefix> <gw> <dns> <sec>"
+              cmd_apply "$2" "$3" "$4" "$5" "$6" ;;
+    confirm)  cmd_confirm ;;
+    rollback) cmd_rollback ;;
+    *)        die "사용법: acu-netcfg {show|check|apply|confirm|rollback}" ;;
+esac

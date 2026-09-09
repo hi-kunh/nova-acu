@@ -1,0 +1,16 @@
+[Unit]
+Description=ACU network config rollback on boot (unconfirmed change)
+# 확인 창(수십 초) 도중에 전원이 나가면, 다음 부팅에서 잘못된 IP가 그대로 살아난다.
+# 그 경우 화면도 키보드도 없어 복구할 방법이 없으므로, 확인되지 않은 변경은 부팅 때 되돌린다.
+DefaultDependencies=no
+After=local-fs.target
+Before=NetworkManager.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/acu-netcfg rollback
+
+[Install]
+WantedBy=sysinit.target

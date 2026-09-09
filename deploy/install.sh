@@ -55,6 +55,32 @@ install -m 0644 "$UNIT_SRC" "$UNIT_DST"
 systemctl daemon-reload
 echo "설치: $UNIT_DST"
 
+# 4-1) 네트워크 설정 헬퍼 + 부팅 시 롤백 + sudoers
+#      화면/키보드가 없는 장치라 IP를 webui로 바꿔야 하는데, 잘못 넣으면 복구할 수단이 없다.
+#      헬퍼가 검증/자동 롤백을 책임지고, webui는 root가 되지 않는다.
+NETCFG_SRC="$(dirname "$0")/acu-netcfg"
+if [ -f "$NETCFG_SRC" ]; then
+    install -m 0755 "$NETCFG_SRC" /usr/local/sbin/acu-netcfg
+    install -m 0644 "$(dirname "$0")/acu-netcfg-boot.service" \
+            /etc/systemd/system/acu-netcfg-boot.service
+    # sudoers는 문법 오류가 나면 sudo 자체가 막히므로 반드시 검사 후 설치한다
+    TMP_SUDO=$(mktemp)
+    cp "$(dirname "$0")/sudoers-acu-netcfg" "$TMP_SUDO"
+    if visudo -cf "$TMP_SUDO" >/dev/null 2>&1; then
+        install -m 0440 -o root -g root "$TMP_SUDO" /etc/sudoers.d/acu-netcfg
+        echo "설치: /usr/local/sbin/acu-netcfg, /etc/sudoers.d/acu-netcfg"
+    else
+        echo "경고: sudoers 문법 검사 실패 - 설치하지 않았다" >&2
+    fi
+    rm -f "$TMP_SUDO"
+    systemctl daemon-reload
+    systemctl enable acu-netcfg-boot.service >/dev/null 2>&1 || true
+
+    if ! command -v arping >/dev/null 2>&1; then
+        echo "참고: arping이 없다. IP 충돌 검사를 위해 'apt install iputils-arping' 권장" >&2
+    fi
+fi
+
 # 5) mock 단계 한정 - 개발 계정이 카드 주입 FIFO에 쓸 수 있게 acud 그룹에 넣는다.
 #    6단계에서 실제 HAL로 바뀌면 필요 없어진다. (재로그인해야 그룹이 적용된다)
 DEV_USER="${SUDO_USER:-}"

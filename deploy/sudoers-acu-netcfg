@@ -1,0 +1,4 @@
+# webui가 네트워크 설정을 바꾸려면 root 권한이 필요하다.
+# webui를 root로 돌리는 대신, 검증과 롤백을 책임지는 헬퍼 하나만 열어 준다.
+# acud 그룹에 속한 계정(=webui를 돌리는 계정)만 쓸 수 있다.
+%acud ALL=(root) NOPASSWD: /usr/local/sbin/acu-netcfg

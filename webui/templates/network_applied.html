@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>새 주소로 이동하세요</title>
+  <style>
+    body { font-family: sans-serif; max-width: 520px; margin: 40px auto; padding: 0 16px; }
+    .box { background: #fcf8e3; color: #8a6d3b; border: 1px solid #e0d6a8;
+           padding: 16px; border-radius: 4px; }
+    a.big { display: block; margin-top: 16px; font-size: 1.2em; font-family: monospace; }
+    .hint { color: #666; font-size: 0.9em; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>새 주소로 이동하세요</h1>
+  <div class="box">
+    <p>
+      네트워크 설정을 적용했습니다. <b>이 페이지는 더 이상 유효하지 않습니다</b> —
+      지금 보고 계신 주소는 옛 주소이기 때문입니다.
+    </p>
+    <p>
+      <b>{{ seconds }}초 안에</b> 아래 주소로 접속해 로그인한 뒤 <b>확정</b>을 누르세요.
+      누르지 않으면 이전 설정으로 <b>자동 복구</b>됩니다.
+    </p>
+    <a class="big" href="http://{{ new_ip }}:{{ port }}/network">http://{{ new_ip }}:{{ port }}/network</a>
+  </div>
+  <p class="hint">
+    주소가 바뀌면 브라우저 세션이 초기화되므로 새 주소에서 다시 로그인해야 합니다.
+    그 시간까지 고려해 복구 시간을 {{ seconds }}초로 잡았습니다.<br>
+    새 주소로 접속이 안 된다면 아무것도 하지 말고 기다리세요 — 자동으로 되돌아갑니다.
+  </p>
+</body>
+</html>
