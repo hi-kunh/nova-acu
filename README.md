@@ -969,6 +969,53 @@ VERSION                   버전 / 아키텍처 / 빌드 시각 / 빌드 OS / gl
 
 eMMC가 7.3G인 것을 감안하면 이 정리는 용량 문제이기도 하다 (TODO의 eMMC 이전 항목과 연결).
 
+### 컨테이너 빌드 — 개발 PC에서 보드용 번들 만들기 (2026-09-09)
+
+보드에 접속하지 않고도 배포용 번들을 만들 수 있게 했다. 빌드는 **bullseye arm64 컨테이너 안에서** 돈다.
+
+```bash
+sh deploy/build-container.sh        # dist/acud-<커밋>-aarch64.tar.gz
+```
+
+- `deploy/Containerfile.build` — `debian:bullseye` (arm64) + gcc/make/libc6-dev/libsqlite3-dev/libcjson-dev
+- 필요한 것: `podman qemu-user qemu-user-binfmt` (개발 PC에 설치)
+- 이미지는 처음 한 번만 만든다. 두 번째부터는 그 단계를 건너뛴다
+
+**왜 크로스 컴파일러가 아니라 컨테이너인가** — 개발 PC는 Ubuntu 26.04 / glibc **2.43**, 보드는
+Debian 11 / glibc **2.31**이다. 개발 PC의 `aarch64-linux-gnu-gcc`로 빌드하면 glibc 2.43 심볼을 참조해
+보드에서 `version GLIBC_2.3x not found`가 난다. 타깃과 같은 이미지 안에서 빌드하면 그 문제가 아예 없다.
+
+#### bullseye EOL이 여기서도 발목을 잡았다 (두 번째)
+
+베이스 이미지 `debian:bullseye`에는 **이미 security 버전 `libc6 2.31-13+deb11u14`가 들어 있다.**
+그런데 (보드에서 겪은 것과 같은 이유로) security 저장소를 끄면 남는 것은 bullseye main의 u11뿐이라
+
+```
+libc6-dev : Depends: libc6 (= 2.31-13+deb11u11) but 2.31-13+deb11u14 is to be installed
+```
+
+로 설치가 막힌다. bullseye main을 **우선순위 1001**로 핀해 다운그레이드를 허용하는 것으로 풀었다
+(apt는 1000을 넘겨야 다운그레이드를 한다).
+
+**u11로 맞추는 것이 옳은 이유**: 보드에 실제로 깔려 있는 것이 u11이다. 그리고 glibc는 심볼 버전을
+쓰므로 낮은 버전으로 빌드한 바이너리는 높은 버전에서도 돈다.
+
+#### 검증 — 개발 PC가 만든 번들을 보드에 넣었다
+
+`scp`로 **번들 하나만** 보내고 설치했다(소스 전송 없음).
+
+| 항목 | 결과 |
+|------|------|
+| 바이너리가 요구하는 glibc | **`GLIBC_2.17`** (arm64 기준선) — 보드의 2.31보다 훨씬 낮다 |
+| 링크하는 라이브러리 | `libsqlite3.so.0`, `libcjson.so.1`, `libc.so.6` 뿐 |
+| **개발 PC 산출물 vs 보드 설치본 sha256** | **동일** (`b7a8dcfa0d43...`) |
+| 서비스 | `active` |
+| UDP 탐색 / IDTi TCP / 카드 이벤트 / SETT 거절 | 전부 정상 |
+
+`VERSION` 파일의 `built_on`은 개발 PC의 커널(`Linux 7.0.0-31-generic`)로 찍힌다 — 컨테이너는
+커널을 호스트와 공유하기 때문이다. 반면 `built_os`는 `Debian GNU/Linux 11 (bullseye)`,
+`glibc`는 `2.31`로 나온다. **중요한 것은 유저랜드이고, 그쪽은 타깃과 정확히 같다.**
+
 ## 빌드 & 실행
 
 ```bash
