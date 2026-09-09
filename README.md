@@ -698,6 +698,53 @@ systemd-analyze blame:  38.508s NetworkManager-wait-online.service
 **주의**: 주소가 바뀌면 브라우저 오리진이 달라져 **세션이 초기화되고 재로그인이 필요하다.**
 그 시간까지 고려해 기본 롤백 창을 180초로 잡았다 (`ACU_NETCFG_ROLLBACK_SECONDS`).
 
+### netmodule UDP 탐색/설정 프로토콜 (PC 소스에서 확인, 2026-09-09)
+
+기존 장비는 **장비의 LCD+키패드**로도, **IntelliScan Device Manager의 search**로도 네트워크 설정을
+바꿀 수 있다. 후자의 구현이 `islnetmodule` + `IntelliScan Device Manager/clsNetModule.cs`에 있다.
+**우리 ACU가 이 프로토콜을 그대로 말하면 PC 쪽 변경 없이 기존 도구로 발견·설정된다.**
+
+**포트** (`clsNetModule.cs:12-14`)
+
+| 용도 | 포트 |
+|------|------|
+| PC -> 장치 UDP 브로드캐스트 | **1460** |
+| 장치 -> PC UDP 응답 | **5001** |
+| 설정용 TCP | **1461** |
+
+**명령** (4byte ASCII, `clsnmSettingFrame.cs`)
+
+| 방향 | 명령 | 길이 | 뜻 |
+|------|------|------|-----|
+| 요청 | `FIND` | 4 | 브로드캐스트 탐색 (명령 4byte가 전부) |
+| 응답 | `IMIN` | 50 | "나 여기 있다" + 현재 설정 전체 |
+| 요청 | `SETT` | 58 | 설정 변경 (= IMIN 50 + 비밀번호 8) |
+| 응답 | `SETC` / `FAIL` | 58 | 성공 / 실패 |
+| 요청 | `PASS` | 28 | 비밀번호 변경 |
+| 응답 | `PASC`/`PASF`/`PASN`/`PAST` | 12 | 성공/구번호 틀림/확인 불일치/기타 |
+
+**IMIN(50byte) 필드 순서** — `SETT`는 여기에 Company/Custom 비밀번호 4+4byte가 더 붙어 58byte
+
+```
+Command(4) MacAddress(6) TcpMode(1) RemoteIP(4) SubnetMask(4) GateWay(4) RemotePort(2)
+PeerIP(4) PeerPort(2) SerialBPS(1) Databit(1) Parity(1) Stopbit(1) Flow(1)
+DatapackingChar(1) DatapackingSize(2) DatapackingTime(2) InactivityTime(2)
+SerialDebugMode(1) FirmwareVersion(2) DhcpMode(1) UdpMode(1) Connect(1) PasswordSetFlag(1)
+= 50
+```
+
+- **`RemoteIP`/`SubnetMask`/`GateWay`가 장치 자신의 IP 설정**이고, `PeerIP`/`PeerPort`는
+  접속할 상위 PC다. `TcpMode`는 `Client=0 / Mixed=1 / Server=2` — 우리는 **Server(2)**,
+  `RemotePort`는 우리 수신 포트(1004)
+- **`PasswordCompany`는 `"IDTi"` 고정**, `PasswordCustom` 기본값 `"0000"` (`clsnmSettingFrame.cs:24-25`)
+- Serial 계열 필드(BPS/Databit/Parity/Stopbit/Flow/Datapacking/Inactivity)는 **시리얼-이더넷 변환
+  모듈 시절의 잔재**다. 우리는 시리얼을 쓰지 않으므로 고정값을 채워 보내고, 받을 때는 무시하면 된다
+  (PC 화면에 표시만 될 뿐 동작에 영향이 없다). SerialBPS 인코딩은 `244=9600, 250=19200,
+  253=38400, 254=57600, 255=115200` 식의 비선형 코드다
+
+**이것이 중요한 이유**: `FIND`는 L2 브로드캐스트라 **장치의 IP를 몰라도, 심지어 대역이 달라도 찾힌다.**
+webui의 닭-달걀 문제(설정하려면 먼저 접속해야 하는데, 접속이 안 되니까 설정하려는 것)를 없앤다.
+
 ## 빌드 & 실행
 
 ```bash
