@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
@@ -29,7 +30,13 @@
  * 무엇을 보고 있는지 알 수 없었다. 그래서 주입식으로 바꾸고, 예전 동작은 "auto on"으로 남겨 뒀다.
  */
 
-#define MOCK_FIFO_PATH "acud_mock.fifo"
+/*
+ * 기본은 cwd 상대경로지만, 데몬으로 띄우면 cwd가 "/"라 쓸 수 없다.
+ * 환경변수 ACU_MOCK_FIFO로 절대경로를 줄 수 있게 해 뒀다 (systemd 유닛의 Environment=).
+ * mock 전용이라 config.json(제품 설정)에는 넣지 않는다 - 6단계에서 실제 HAL로 교체되면 사라질 값이다.
+ */
+#define MOCK_FIFO_PATH_DEFAULT "acud_mock.fifo"
+#define MOCK_FIFO_PATH_ENV     "ACU_MOCK_FIFO"
 #define MOCK_LINE_CAP  256
 
 static const char *DUMMY_CARD_IDS[] = {
@@ -198,9 +205,18 @@ static void drain_fifo(void)
     }
 }
 
+/* 실제로 쓸 FIFO 경로. hal_init()에서 한 번 정해 두고 hal_shutdown()까지 같은 값을 쓴다 */
+static char g_fifo_path[256] = MOCK_FIFO_PATH_DEFAULT;
+
 int hal_init(void)
 {
-    if (mkfifo(MOCK_FIFO_PATH, 0666) != 0 && errno != EEXIST)
+    const char *env = getenv(MOCK_FIFO_PATH_ENV);
+    if (env && env[0] != '\0')
+    {
+        snprintf(g_fifo_path, sizeof(g_fifo_path), "%s", env);
+    }
+
+    if (mkfifo(g_fifo_path, 0666) != 0 && errno != EEXIST)
     {
         log_msg("HAL(mock): 카드 주입 FIFO 생성 실패 - 카드 입력 없이 동작함");
         return 0; /* FIFO가 없어도 데몬 자체는 계속 동작해야 한다 */
@@ -211,16 +227,24 @@ int hal_init(void)
      * 쓰는 쪽이 붙었다 떨어질 때마다 상태가 흔들린다. 우리가 쓰기 끝도 함께 붙들고 있으면 항상
      * "열려 있는 파이프"가 되어 EOF 없이 논블로킹으로 계속 읽을 수 있다.
      */
-    g_fifo_fd = open(MOCK_FIFO_PATH, O_RDWR | O_NONBLOCK);
+    g_fifo_fd = open(g_fifo_path, O_RDWR | O_NONBLOCK);
     if (g_fifo_fd < 0)
     {
         log_msg("HAL(mock): 카드 주입 FIFO 열기 실패 - 카드 입력 없이 동작함");
         return 0;
     }
 
-    log_msg("HAL(mock) 초기화 - 실제 리더기 없음. 테스트 입력은 " MOCK_FIFO_PATH " 로 주입");
-    log_msg("HAL(mock)   예) echo 04A1B2C3D4E5F600 > " MOCK_FIFO_PATH "   (카드 태그)");
-    log_msg("HAL(mock)   예) echo \"door open\" > " MOCK_FIFO_PATH "   / \"auto on\" 이면 예전처럼 자동 순회");
+    char msg[400];
+    snprintf(msg, sizeof(msg),
+             "HAL(mock) 초기화 - 실제 리더기 없음. 테스트 입력은 %s 로 주입", g_fifo_path);
+    log_msg(msg);
+    snprintf(msg, sizeof(msg),
+             "HAL(mock)   예) echo 04A1B2C3D4E5F600 > %s   (카드 태그)", g_fifo_path);
+    log_msg(msg);
+    snprintf(msg, sizeof(msg),
+             "HAL(mock)   예) echo \"door open\" > %s   / \"auto on\" 이면 예전처럼 자동 순회",
+             g_fifo_path);
+    log_msg(msg);
     return 0;
 }
 
@@ -231,7 +255,7 @@ void hal_shutdown(void)
         close(g_fifo_fd);
         g_fifo_fd = -1;
     }
-    unlink(MOCK_FIFO_PATH);
+    unlink(g_fifo_path);
 }
 
 int hal_read_card(char *out_card_id, size_t out_len)

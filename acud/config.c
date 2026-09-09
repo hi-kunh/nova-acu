@@ -13,6 +13,8 @@
 /* 최초 기본값. 반드시 웹 설정 화면에서 변경해야 하는 값 - 절대 이 기본값 그대로 배포하면 안 됨 */
 #define ACU_DEFAULT_ADMIN_PASSWORD "0000"
 #define ACU_DEFAULT_TCP_PORT 9870
+#define ACU_DEFAULT_PID_PATH "acud.pid"
+#define ACU_DEFAULT_LOG_PATH ""   /* 빈 문자열 = stdout */
 
 void config_set_defaults(AcuConfig *cfg)
 {
@@ -20,6 +22,8 @@ void config_set_defaults(AcuConfig *cfg)
     cfg->door_open_seconds = ACU_DEFAULT_DOOR_OPEN_SECONDS;
     snprintf(cfg->admin_password, sizeof(cfg->admin_password), "%s", ACU_DEFAULT_ADMIN_PASSWORD);
     cfg->tcp_port = ACU_DEFAULT_TCP_PORT;
+    snprintf(cfg->pid_path, sizeof(cfg->pid_path), "%s", ACU_DEFAULT_PID_PATH);
+    snprintf(cfg->log_path, sizeof(cfg->log_path), "%s", ACU_DEFAULT_LOG_PATH);
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -95,6 +99,8 @@ int config_load(const char *path, AcuConfig *cfg)
     const cJSON *door_open_seconds = cJSON_GetObjectItemCaseSensitive(root, "door_open_seconds");
     const cJSON *admin_password = cJSON_GetObjectItemCaseSensitive(root, "admin_password");
     const cJSON *tcp_port = cJSON_GetObjectItemCaseSensitive(root, "tcp_port");
+    const cJSON *pid_path = cJSON_GetObjectItemCaseSensitive(root, "pid_path");
+    const cJSON *log_path = cJSON_GetObjectItemCaseSensitive(root, "log_path");
 
     if (!cJSON_IsString(db_path) || db_path->valuestring[0] == '\0')
     {
@@ -127,6 +133,29 @@ int config_load(const char *path, AcuConfig *cfg)
     cfg->door_open_seconds = door_open_seconds->valueint;
     snprintf(cfg->admin_password, sizeof(cfg->admin_password), "%s", admin_password->valuestring);
     cfg->tcp_port = tcp_port->valueint;
+
+    /*
+     * 선택 필드. 없거나 빈 문자열이면 기본값으로 되돌린다
+     * (키를 지우는 것만으로 기본 동작을 되찾을 수 있게 하기 위함).
+     */
+    if (cJSON_IsString(pid_path) && pid_path->valuestring[0] != '\0')
+    {
+        snprintf(cfg->pid_path, sizeof(cfg->pid_path), "%s", pid_path->valuestring);
+    }
+    else
+    {
+        snprintf(cfg->pid_path, sizeof(cfg->pid_path), "%s", ACU_DEFAULT_PID_PATH);
+    }
+
+    /* log_path는 빈 문자열 자체가 "stdout"이라는 유효한 값이다 */
+    if (cJSON_IsString(log_path))
+    {
+        snprintf(cfg->log_path, sizeof(cfg->log_path), "%s", log_path->valuestring);
+    }
+    else
+    {
+        snprintf(cfg->log_path, sizeof(cfg->log_path), "%s", ACU_DEFAULT_LOG_PATH);
+    }
 
     cJSON_Delete(root);
     return 0;

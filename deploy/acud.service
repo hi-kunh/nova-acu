@@ -1,0 +1,53 @@
+[Unit]
+Description=ACU (Access Control Unit) daemon
+Documentation=https://github.com/hi-kunh/nova-acu
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=acud
+Group=acud
+
+# 경로는 전부 절대경로다. systemd는 cwd를 "/"로 잡기 때문에 상대경로를 쓰면
+# 설정을 못 찾고 DB도 만들지 못한다. db_path/pid_path는 config.json 안에 있다.
+ExecStart=/usr/local/sbin/acud -c /etc/acud/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+
+# /run/acud (PID 파일, mock FIFO). 부팅마다 새로 만들어지고 서비스가 멈추면 지워진다
+RuntimeDirectory=acud
+RuntimeDirectoryMode=0750
+
+# /var/lib/acud (SQLite DB). 재부팅해도 남는다
+StateDirectory=acud
+StateDirectoryMode=0750
+
+# mock HAL 전용. 6단계에서 실제 RRU HAL로 바뀌면 이 줄은 사라진다.
+# UMask=0007과 함께 FIFO가 0660 acud:acud로 만들어져, acud 그룹에 속한 개발 계정만 카드를 주입할 수 있다
+# (누구나 쓸 수 있으면 "출입 허용" 이벤트를 임의로 넣을 수 있게 된다)
+Environment=ACU_MOCK_FIFO=/run/acud/acud_mock.fifo
+UMask=0007
+
+Restart=always
+RestartSec=2
+
+# 로그는 stdout -> journald. config.json의 log_path를 비워 두면 이 경로로 간다
+#   journalctl -u acud -f
+StandardOutput=journal
+StandardError=journal
+
+# 포트 1004는 특권 포트(<1024)라 일반 사용자로는 bind가 안 된다.
+# root로 돌리는 대신 이 능력 하나만 준다
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

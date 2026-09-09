@@ -534,6 +534,79 @@ security를 끄는 것이 보안상 후퇴로 보이지만, **지금 그 저장�
   커널/BSP 패키지를 apt로 갱신해야 할 때 문제가 된다
 - **보드 계정이 아직 기본값**(`rock`/`rock`) — 변경 필요
 
+### 5.5-2 완료 (2026-09-09) — 데몬화: 경로 절대화 + 로그 + systemd
+
+손으로 띄우던 프로그램을 **전원만 넣으면 도는 서비스**로 만들었다.
+
+**① 경로 절대화** — 모든 경로가 cwd 상대경로였다. systemd는 cwd를 `/`로 잡기 때문에 그대로는
+설정을 못 찾고 DB도 만들지 못한다.
+
+| 경로 | 이전 | 지금 |
+|------|------|------|
+| config | `config.json` 고정 | **`-c PATH` 옵션** (기본값은 그대로라 개발 흐름은 안 바뀜) |
+| DB | config의 `db_path` | 그대로 (절대경로를 넣으면 됨) |
+| PID | `acud.pid` 고정 | config의 **`pid_path`** (선택 필드) |
+| 로그 | stdout 고정 | config의 **`log_path`** (빈 문자열이면 stdout) |
+| mock FIFO | `acud_mock.fifo` 고정 | 환경변수 **`ACU_MOCK_FIFO`** |
+
+- `pid_path`/`log_path`는 **선택 필드**라 기존 config.json이 그대로 동작한다. 키가 없으면 기본값으로
+  되돌아가므로, 키를 지우는 것만으로 기본 동작을 되찾을 수 있다
+- **mock FIFO만 config가 아니라 환경변수**인 이유: 6단계에서 실제 RRU HAL로 교체되면 사라질 값이라
+  제품 설정 스키마(config.json)에 넣지 않았다
+- `pid_path`는 실행 중 바뀌어도 따라가지 않는다 — 종료 시 지울 대상이 흔들리면 PID 파일이 남아
+  떠돌게 된다. 리로드 시 감지해서 "재시작해야 반영된다"고 로그만 남긴다
+- HAL/DB 초기화 실패로 조기 종료할 때도 PID 파일을 지우도록 고쳤다 (죽은 PID가 남으면 웹 설정
+  화면이 엉뚱한 프로세스에 SIGHUP을 보낸다)
+
+**② 로그** — `log.c`에 `log_open()/log_reopen()/log_close()` 추가. 기본은 stdout이고,
+systemd에서는 stdout이 그대로 journald로 들어가므로 유닛에서는 `log_path`를 비워 둔다.
+journald를 안 쓰는 환경을 위해 파일 출력도 되며, **SIGHUP 때 같은 경로로 다시 연다**(logrotate 대응).
+로그 파일을 못 열어도 stdout으로 내려가며 데몬은 계속 돈다.
+
+**③ systemd 유닛** (`deploy/acud.service`, `deploy/install.sh`, `deploy/config.json`)
+
+```
+/usr/local/sbin/acud            바이너리
+/etc/acud/config.json           설정 (0640 root:acud)
+/run/acud/{acud.pid,acud_mock.fifo}   RuntimeDirectory - 부팅마다 새로 생성
+/var/lib/acud/acud.db           StateDirectory - 재부팅해도 남음
+```
+
+- **전용 시스템 계정 `acud`** (로그인 불가). root로 돌리지 않는다
+- **`AmbientCapabilities=CAP_NET_BIND_SERVICE`** — 포트 1004는 특권 포트(<1024)라 일반 사용자로는
+  bind가 안 된다. root 대신 이 능력 하나만 준다
+- `install.sh`는 **바이너리 하나만 있으면 동작한다**(소스 불필요). 5.5-5의 바이너리 전용 배포로
+  넘어가도 그대로 쓸 수 있다. 기존 `/etc/acud/config.json`은 **덮어쓰지 않는다**
+- mock 카드 주입을 위해 개발 계정을 `acud` 그룹에 넣는다. `UMask=0007`과 함께 FIFO가
+  **0660 acud:acud**로 만들어진다 — 누구나 쓸 수 있으면 "출입 허용" 이벤트를 임의로 넣을 수 있다.
+  6단계에서 mock이 사라지면 이 설정도 없어진다
+
+**검증 결과 (보드에서 실제 확인)**
+
+| 항목 | 결과 |
+|------|------|
+| cwd=`/`에서 절대경로만으로 기동 | OK (개발 PC에서 선행 확인) |
+| `systemctl enable --now acud` | `active (running)`, `enabled` |
+| 로그 -> journald | `journalctl -u acud`로 확인 |
+| 런타임 파일 권한 | `/run/acud` 0750 acud:acud, FIFO `prw-rw---- acud acud` |
+| **포트 1004 bind (특권 포트)** | **성공** — `acud` 일반 사용자로, 재시작 없이 `systemctl reload`만으로 9870->1004 전환 |
+| PC에서 1004 접속 | Firmware 548byte 응답 |
+| `kill -9` 후 자동 재시작 | PID 7105 -> 7178, `active` 복귀 |
+| 서비스 상태로 카드 주입 -> 이벤트 | 316byte 이벤트 정상 수신 |
+
+**같이 고친 것** — `webui/app.py`가 `ACU_ACUD_DIR` 한 디렉터리에서 config와 PID를 둘 다 찾았는데,
+데몬화하면 설정은 `/etc/acud/`, PID는 `/run/acud/`로 흩어진다. `ACU_CONFIG_PATH` / `ACU_PID_PATH`로
+따로 지정할 수 있게 했다(기존 방식은 기본값으로 유지).
+
+**남은 것**
+
+- **eth0가 죽어 있다** — `NO-CARRIER`, `/sys/class/net/eth0/carrier = 0`. **케이블 미연결**이다.
+  제품은 이더넷을 쓰므로 케이블을 꽂고 다시 봐야 한다. 지금은 wlan0(192.168.0.132)로 통신 중
+- **eth0 MAC이 부팅마다 바뀐다** — `0a:96:73:bb:05:8b`는 locally-administered 랜덤 MAC이다
+  (RK3566에 MAC이 구워져 있지 않아 커널이 매번 만든다). **DHCP 예약도, PC 쪽 장치 식별도 깨진다.**
+  제품에서는 MAC을 고정해야 한다
+- 웹UI를 보드에 올릴지는 5.5-5(소스 노출)와 함께 결정
+
 ## 빌드 & 실행
 
 ```bash
@@ -550,3 +623,35 @@ kill -TERM <pid>   # 정상 종료
 ```
 
 또는 실행 중인 터미널에서 `Ctrl+C` (SIGINT) 로도 정상 종료된다.
+
+설정 파일 경로는 `-c`로 바꿀 수 있다 (기본값 `config.json`). `db_path`/`pid_path`/`log_path`는
+설정 파일 안에서 지정한다.
+
+```bash
+./acud -c /etc/acud/config.json
+./acud -h
+```
+
+## 보드 배포 (systemd 서비스)
+
+```bash
+# 개발 PC -> 보드로 소스 전송
+rsync -av --exclude .git --exclude '__pycache__' ~/workspace/nova-acu/ rock@192.168.0.132:~/nova-acu/
+
+# 보드에서
+cd ~/nova-acu/acud && make
+cd ~/nova-acu && sudo sh deploy/install.sh
+sudo systemctl enable --now acud
+```
+
+`install.sh`는 **acud 바이너리 하나만 있으면 동작한다**(소스 불필요).
+바이너리 경로를 인자로 줄 수 있다: `sudo sh deploy/install.sh /경로/acud`
+
+```bash
+systemctl status acud
+journalctl -u acud -f              # 로그
+sudo systemctl reload acud         # SIGHUP - /etc/acud/config.json 다시 읽기
+
+# mock 카드 주입 (acud 그룹에 속해 있어야 한다. install.sh가 넣어 주며 재로그인 필요)
+echo 04A1B2C3D4E5F600 > /run/acud/acud_mock.fifo
+```

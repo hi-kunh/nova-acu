@@ -23,11 +23,14 @@ import time
 
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
+# 개발 중에는 acud/ 한 디렉터리에 config.json과 acud.pid가 같이 있지만,
+# systemd로 띄우면 설정은 /etc/acud/, PID는 /run/acud/로 흩어진다.
+# 그래서 각각 따로 지정할 수 있게 하고, ACU_ACUD_DIR는 기존 방식의 기본값으로 남긴다.
 ACUD_DIR = os.environ.get(
     "ACU_ACUD_DIR", os.path.join(os.path.dirname(__file__), "..", "acud")
 )
-CONFIG_PATH = os.path.join(ACUD_DIR, "config.json")
-PID_PATH = os.path.join(ACUD_DIR, "acud.pid")
+CONFIG_PATH = os.environ.get("ACU_CONFIG_PATH") or os.path.join(ACUD_DIR, "config.json")
+PID_PATH = os.environ.get("ACU_PID_PATH") or os.path.join(ACUD_DIR, "acud.pid")
 
 DEFAULT_CONFIG = {
     "db_path": "acud.db",

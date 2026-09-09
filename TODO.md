@@ -23,7 +23,7 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
 | 3 | config.json 감시 + 무중단 리로드(SIGHUP) | ✅ 완료 |
 | 4 | 웹 설정 인터페이스 (Flask) | 🔶 1차 범위만 (config 편집) |
 | 5 | 네트워크 통신부 (TCP, IDTi 프로토콜 V2) | 🔶 1차 범위만 (Event Log 응답) |
-| 5.5 | **ACU 단독 개통 (CM3 보드 + PC 통신)** | 🔶 **개통 1차 성공 (2026-09-09)** / systemd·포트1004 남음 |
+| 5.5 | **ACU 단독 개통 (CM3 보드 + PC 통신)** | 🔶 **개통 + 데몬화 완료 (2026-09-09)** / 실제 PC 연동 남음 |
 | 6 | 실제 하드웨어 (USB, ACU↔RRU) | ⬜ 개발보드 대기 |
 | 7+ | 배포/운영 (systemd, 보안 강화 등) | ⬜ 미착수 |
 
@@ -72,7 +72,7 @@ TCP로 통신을 개통**하는 것이 목표. 리더/릴레이는 mock으로 �
 
 - [ ] **빌드/배포 방식을 바이너리 전용으로 전환** — 아래 5.5-5 (새 절). 제품 ACU에 소스와
       툴체인이 남지 않게 하는 작업. 개통이 끝났으니 이제 착수할 시점이다
-- [ ] **5.5-2** 경로 절대화, systemd 유닛, 로그를 journald로
+- [x] ~~**5.5-2** 경로 절대화, systemd 유닛, 로그를 journald로~~ -> **완료 2026-09-09** (eth0만 남음)
 - [ ] **5.5-3** 포트 1004 전환 후 실제 PC 프로그램(IntelliScan NET Platinum)과 통신
 - [ ] 보드 기본 계정 비밀번호 변경 (`rock`/`rock` 그대로다)
 
@@ -109,30 +109,44 @@ Ubuntu의 `gcc-aarch64-linux-gnu`로 빌드하면 glibc 2.43 심볼을 참조해
       `auto on`으로만 동작. (이전에는 이벤트 큐 32개가 1분이면 가득 차 통신 테스트가 불가능했음)
 - [x] **테스트 클라이언트 저장소에 포함** — `tools/idti_client.py` (PC 역할, 접속하는 쪽)
 
-### 5.5-2. 보드에 올리기 (다음 작업)
+### 5.5-2. 보드에 올리기 — ✅ 완료 2026-09-09 (eth0 제외)
 
 - [x] ~~**OS 이미지 기록(flash) 및 첫 부팅**~~ -> **완료** (2026-09-08)
 - [x] ~~빌드 방식 결정~~ -> **개발 단계는 보드 네이티브 빌드**(2026-09-09 개통 완료).
       **제품은 바이너리 전용 배포로 전환** — 5.5-5 절 참고
 - [x] ~~보드에 의존성 설치~~ -> **완료** (2026-09-09). `libsqlite3-dev libcjson-dev` (+`libc6-dev`)
 - [ ] **보드 네트워크** — 고정 IP(또는 DHCP 예약), PC에서 포트 도달 확인
-  - 현재 상태(2026-09-08): **wlan0 = 192.168.0.132 (UP), eth0 = DOWN**.
-    개발 PC(192.168.0.73)와 **같은 대역이라 지금 바로 통신 테스트가 가능**하다
-  - **제품은 이더넷을 쓸 것이므로 eth0을 살려야 한다** (케이블 연결 확인)
-- [ ] **시간 동기화** — NTP 또는 RTC. IDTi 이벤트는 BCD 시각을 싣기 때문에 시각이 틀리면 이벤트가 무의미.
-      타임존(KST) 설정도 함께
-- [ ] **경로 절대화** — 현재 `config.json`/`acud.db`/`acud.pid`/`acud_mock.fifo`를 전부 cwd 상대경로로 씀.
-      데몬으로 띄우려면 절대경로 또는 WorkingDirectory 지정 필요
-- [ ] **systemd 유닛** (`acud.service`) + 부팅 시 자동 시작
-  - [ ] **포트 1004는 특권 포트(<1024)다** — 일반 사용자로 띄우면 bind가 실패한다.
-        `AmbientCapabilities=CAP_NET_BIND_SERVICE`를 주거나 root로 실행할 것.
-        (현재 `net_init` 실패 시 데몬은 계속 도니 조용히 통신만 안 되는 상태가 된다 — 로그 확인 필요)
-- [ ] **로그를 stdout -> journald/파일**로 (지금 stdout만이라 데몬화하면 로그가 사라짐)
-- [ ] 웹UI를 보드에서 띄울지 결정 (`webui/app.py:178`이 `0.0.0.0`, Flask 개발 서버)
+  - wlan0 = 192.168.0.132 (UP)로 통신 중. PC에서 포트 도달 확인 완료
+  - [ ] **eth0가 죽어 있다** — `NO-CARRIER`, `/sys/class/net/eth0/carrier = 0`.
+        **케이블 미연결**이다(2026-09-09 확인). 제품은 이더넷을 쓰므로 케이블을 꽂고 다시 봐야 한다
+  - [ ] **eth0 MAC이 부팅마다 바뀐다** — `0a:96:73:bb:05:8b`는 locally-administered 랜덤 MAC.
+        RK3566에 MAC이 구워져 있지 않아 커널이 매번 만든다.
+        **DHCP 예약도 PC 쪽 장치 식별도 깨지므로 제품에서는 고정해야 한다**
+- [x] ~~**시간 동기화**~~ -> **완료** (2026-09-09). `Asia/Seoul` (KST +0900), NTP 동기화 확인.
+      이벤트 BCD 시각이 PC에서 정상으로 보이는 것까지 확인함
+- [x] ~~**경로 절대화**~~ -> **완료** (2026-09-09).
+      config는 `-c PATH` 옵션, PID/로그는 config.json의 `pid_path`/`log_path`(선택 필드),
+      mock FIFO는 환경변수 `ACU_MOCK_FIFO`. cwd=`/`에서 동작 확인
+- [x] ~~**systemd 유닛** + 부팅 시 자동 시작~~ -> **완료** (2026-09-09).
+      `deploy/acud.service`, `deploy/install.sh`, `deploy/config.json`.
+      전용 계정 `acud`로 실행, `enable --now` + `kill -9` 후 자동 재시작 확인
+  - [x] ~~**포트 1004 특권 포트**~~ -> **해결**. `AmbientCapabilities=CAP_NET_BIND_SERVICE`로
+        일반 사용자 `acud`가 1004에 bind 되는 것을 실제로 확인했다 (root 실행 불필요)
+- [x] ~~**로그를 stdout -> journald/파일**로~~ -> **완료** (2026-09-09).
+      `log_open()/log_reopen()/log_close()` 추가. systemd에서는 stdout이 journald로 들어가므로
+      유닛은 `log_path`를 비워 둔다. 파일 출력 시 SIGHUP에 재오픈(logrotate 대응)
+- [ ] 웹UI를 보드에서 띄울지 결정 (`webui/app.py`가 `0.0.0.0`, Flask 개발 서버) — **5.5-5(소스 노출)와 함께 결정**
+  - [x] ~~경로 준비~~ -> `ACU_CONFIG_PATH` / `ACU_PID_PATH` 환경변수 추가 (2026-09-09).
+        데몬화하면 설정은 `/etc/acud/`, PID는 `/run/acud/`로 흩어져 기존 `ACU_ACUD_DIR` 하나로는 안 된다
+  - [ ] 보드에 `python3-venv` 미설치
 
 ### 5.5-3. PC와 실제 통신 개통
 
-- [ ] **포트를 1004로 맞출지 결정** — DM/Platinum 기본값이 1004. config.json의 `tcp_port` 변경 또는 PC 쪽 설정
+- [x] ~~**포트를 1004로 맞출지 결정**~~ -> **1004로 결정** (2026-09-09).
+      DM/Platinum 기본값에 맞췄다. 특권 포트 bind가 실제로 되는 것을 확인했고
+      **보드는 지금 1004로 돌고 있다**(`/etc/acud/config.json`). `deploy/config.json`도 1004.
+      개발용 `acud/config.json`은 9870 그대로다 — 유닛 밖에서 손으로 띄우면 능력이 없어 bind가 안 되기 때문
+  - [ ] PC 프로그램을 실제로 붙여 확인하는 것은 아직 남아 있다
 - [x] ~~접속 직후 첫 명령에 응답하기~~ -> **구현 완료 (2026-09-08)**.
       `RequestStatus(0x04)/Read(0x02)/Firmware(0x2A)` 요청에 `SendStatus(0x03)` + Firmware Info 268byte로 응답.
       상세는 README "Firmware(0x2A) 상태 요청 응답 구현" 참고
@@ -394,6 +408,8 @@ Radxa가 CM3 IO 보드용으로 낸 공식 이미지라 이더넷/eMMC/USB가 �
       `NO_PUBKEY 67A474DD40402951`, `NO_PUBKEY 5D93177D0752732A`로 서명 검증에 실패해 `apt update`가
       에러를 낸다. 우리 패키지는 전부 Debian main에서 오므로 **빌드에는 영향 없음**.
       커널/BSP 패키지를 apt로 갱신해야 할 때 문제가 된다
+- [ ] **eth0 MAC이 부팅마다 바뀐다** (2026-09-09 확인) — RK3566에 MAC이 구워져 있지 않아
+      커널이 랜덤 locally-administered MAC을 만든다. DHCP 예약/장치 식별이 깨지므로 제품에서는 고정 필요
 - [ ] **Debian bullseye EOL 확정** — security 저장소의 .deb가 실제로 삭제된 것을 확인했다(404).
       제품 출하용 배포판 재선정이 미룰 수 없는 과제가 됐다 (5.5-4 마지막 항목과 연결)
 
