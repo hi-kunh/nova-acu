@@ -462,13 +462,18 @@ IsExistModule  [B0][B1] = 00 0F   (모듈 1~4)
 
 | 코드 | 이름 | 쓸 곳 |
 |------|------|-------|
-| `0x18010401` / `0x18010402` | Fire Detected / Fire Restored | 화재 입력 |
-| **`0x18010306` / `0x18010307`** | **Intrusion Motion Detected / Restored** | **알람 입력 — 확정 (2026-09-10)** |
+| `0x18010401` / `0x18010402` | Fire Detected / Fire Restored | 화재 입력 — Platinum 화면 "화재 알람 발생/복구" |
+| `0x18010306` / `0x18010307` | Intrusion Motion Detected / Restored | 알람 후보 — **재검토 중**. 화면 "모션 알람 발생/복구" |
+| `0x18010304` / `0x18010305` | Intrusion Detected / Restored | 알람 후보 — 화면 "침입 알람 발생/복구" |
+| `0x18010111` / `0x18010112` | Sensor Detected / Restored | 알람 후보 — 화면 "센서 알람 발생/복구" |
 | `0x18010119` / `0x1801011A` | Force Open Mode / Release Force Open Mode | 전체 개방 적용·해제 |
-| `0x20030102` | Hardware_No Response | USB 단절 후보 |
+| `0x20030102` | Hardware_No Response | USB 단절 후보 — 화면 "응답없음"(영문 Hardware No Response). WebApp 판본에만 있음 |
+| `0x2003010B` | Hardware Network (Chip) Error | USB 단절 후보 — 화면 "네트워크(칩) 오류" |
 | `0x20010101` / `0x20010102` | Comm Started / Comm Halted | **DM이 ACU TCP 연결에 사용 — USB용으로 쓰지 말 것** |
 
-- 알람 코드 확인 근거 (2026-09-10)
+- **USB 단절·복구는 새 코드를 만들 수 없다** — 기존 IDTi 보드를 대체하므로 기존 코드에서 골라야 한다 (2026-09-10 사용자).
+  기존 SSC-R4(I/O 보드) 연결 끊김 전용 이벤트는 PC 소스에서 찾지 못했다. Platinum 쪽에 확인할 것
+- 알람 후보 `0x18010306/07` 확인 내용 (2026-09-10) — **재검토 중**
   - 코드표 두 판본(WebApp / SDK) 모두 `0x18010306` = 402719494 Intrusion Motion Detected,
     `0x18010307` = 402719495 Intrusion Motion Restored
   - **DM** `clsEventController.cs`: 분류 `1801` + 오브젝트 `03`(Alarm Ex Sensor) + 결과 `06`/`07`로 해석 표에 등록돼 있다.
@@ -476,7 +481,7 @@ IsExistModule  [B0][B1] = 00 0F   (모듈 1~4)
   - **Platinum** 표시 enum: `MotionDetected = 69` / `MotionRestored = 70` (화재 71/72 바로 앞).
     화면 문구(`resEventCode.ko-KR.resx`): **"모션 알람 발생" / "모션 알람 복구"**
     (영문 "Motion Detected" / "Motion Restored"). 참고로 화재는 "화재 알람 발생"
-    → 운영자에게는 알람 입력이 **"모션 알람"으로 보인다**는 점을 알려 둘 것
+    → **알람 입력이 "모션 알람"으로 보여 부자연스럽다 — 다시 검토하기로 함** (2026-09-10 사용자)
   - ⚠ Platinum은 8자리 코드를 **DB `eventcode_tbl`의 `StringCode` 컬럼**으로 표시 문구에 연결한다.
     `18010306 -> 69` 연결은 소스로 확정할 수 없어 **DB에서 확인**해야 한다(순서상 연결돼 있을 가능성이 높다)
 
