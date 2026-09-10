@@ -192,6 +192,8 @@ int main(int argc, char **argv)
     AcuNet *net = net_init(cfg.tcp_port); /* 실패해도 net=NULL로 계속 진행 (출입 판정은 네트워크 없이도 동작) */
 
     net_set_inactivity_timeout(net, cfg.inactivity_seconds);
+    net_set_device_identity(net, cfg.device_category, cfg.device_type);
+    net_set_time_sync(net, cfg.time_sync_enabled);
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
     AcuDiscover *disc = discover_init(&cfg);
@@ -257,6 +259,8 @@ int main(int argc, char **argv)
                         net = new_net;
                         /* net을 새로 만들었으니 탐색 소켓과 유휴 타임아웃도 다시 얹어 준다 */
                         net_set_inactivity_timeout(net, new_cfg.inactivity_seconds);
+                        net_set_device_identity(net, new_cfg.device_category, new_cfg.device_type);
+                        net_set_time_sync(net, new_cfg.time_sync_enabled);
                         if (disc)
                         {
                             net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
@@ -273,6 +277,8 @@ int main(int argc, char **argv)
                 /* 인터페이스/포트/비밀번호 등 탐색이 보는 값들을 한 번에 반영한다 */
                 discover_apply_config(disc, &cfg);
                 net_set_inactivity_timeout(net, cfg.inactivity_seconds);
+                net_set_device_identity(net, cfg.device_category, cfg.device_type);
+                net_set_time_sync(net, cfg.time_sync_enabled);
                 log_msg("설정 리로드 완료");
             }
             else

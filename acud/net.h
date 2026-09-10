@@ -44,6 +44,20 @@ void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int do
 int net_is_connected(const AcuNet *net);
 
 /*
+ * Device Status / Firmware Info에 실을 장치 식별자를 설정한다.
+ * category는 clsDevParams.DeviceType(Controller=3), type은 ControllerType(SSC_324=33 등).
+ * **PC에 등록한 모델과 맞아야 한다.**
+ */
+void net_set_device_identity(AcuNet *net, int category, int type);
+
+/*
+ * 상위 시스템(DM)이 요청에 실어 보내는 시각으로 시스템 시계를 맞출지 설정한다.
+ * 고립망에는 NTP 서버가 없을 수 있어 이것이 유일한 시각 공급원이 된다.
+ * 시계를 네트워크에서 받는 것은 신뢰 결정이므로 끌 수 있게 해 둔다.
+ */
+void net_set_time_sync(AcuNet *net, int enabled);
+
+/*
  * 유휴 타임아웃(초)을 설정한다. 0이면 끈다.
  * netmodule의 InactivityTime에 대응한다 - 그 시간 동안 클라이언트 활동이 없으면 소켓을 닫는다.
  * 케이블만 빠진 것처럼 상대가 조용히 사라지면 TCP는 한참 뒤에야 알아채므로 직접 정리한다.

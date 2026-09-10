@@ -144,3 +144,14 @@ uint8_t idti_to_bcd(int value)
     }
     return (uint8_t)(((v / 10) << 4) | (v % 10));
 }
+
+int idti_from_bcd(uint8_t value)
+{
+    int hi = (value >> 4) & 0x0F;
+    int lo = value & 0x0F;
+    if (hi > 9 || lo > 9)
+    {
+        return -1;
+    }
+    return hi * 10 + lo;
+}

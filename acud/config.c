@@ -1,5 +1,6 @@
 #include "config.h"
 #include "log.h"
+#include "protocol.h"
 
 #include <cjson/cJSON.h>
 
@@ -24,7 +25,11 @@
  */
 #define ACU_DEFAULT_SETT_PASSWORD ""
 /* DM이 보여 주는 기본값과 같은 값으로 맞춘다 (10분) */
+#define ACU_DEFAULT_DEVICE_CATEGORY IDTI_DEVICE_CATEGORY_DEFAULT
+#define ACU_DEFAULT_DEVICE_TYPE     IDTI_DEVICE_TYPE_DEFAULT
 #define ACU_DEFAULT_INACTIVITY_SECONDS 600
+/* 고립망에는 NTP 서버가 없을 수 있다. 상위 시스템이 유일한 시각 공급원이므로 기본은 켬 */
+#define ACU_DEFAULT_TIME_SYNC 1
 #define ACU_INACTIVITY_MAX 65535  /* 프레임의 2byte 필드 한계 */
 
 void config_set_defaults(AcuConfig *cfg)
@@ -41,6 +46,9 @@ void config_set_defaults(AcuConfig *cfg)
     snprintf(cfg->discovery_sett_password, sizeof(cfg->discovery_sett_password), "%s",
              ACU_DEFAULT_SETT_PASSWORD);
     cfg->inactivity_seconds = ACU_DEFAULT_INACTIVITY_SECONDS;
+    cfg->device_category = ACU_DEFAULT_DEVICE_CATEGORY;
+    cfg->device_type = ACU_DEFAULT_DEVICE_TYPE;
+    cfg->time_sync_enabled = ACU_DEFAULT_TIME_SYNC;
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -125,6 +133,9 @@ int config_load(const char *path, AcuConfig *cfg)
         cJSON_GetObjectItemCaseSensitive(root, "discovery_sett_password");
     const cJSON *inactivity =
         cJSON_GetObjectItemCaseSensitive(root, "inactivity_seconds");
+    const cJSON *dev_category = cJSON_GetObjectItemCaseSensitive(root, "device_category");
+    const cJSON *dev_type = cJSON_GetObjectItemCaseSensitive(root, "device_type");
+    const cJSON *time_sync = cJSON_GetObjectItemCaseSensitive(root, "time_sync_enabled");
 
     if (!cJSON_IsString(db_path) || db_path->valuestring[0] == '\0')
     {
@@ -201,6 +212,28 @@ int config_load(const char *path, AcuConfig *cfg)
         snprintf(cfg->netcfg_request_path, sizeof(cfg->netcfg_request_path), "%s",
                  ACU_DEFAULT_NETCFG_REQUEST_PATH);
     }
+
+    /* JSON의 true/false와 0/1을 모두 받아들인다 */
+    if (cJSON_IsBool(time_sync))
+    {
+        cfg->time_sync_enabled = cJSON_IsTrue(time_sync) ? 1 : 0;
+    }
+    else if (cJSON_IsNumber(time_sync))
+    {
+        cfg->time_sync_enabled = (time_sync->valueint != 0) ? 1 : 0;
+    }
+    else
+    {
+        cfg->time_sync_enabled = ACU_DEFAULT_TIME_SYNC;
+    }
+
+    /* 1byte 필드다. 범위를 벗어나면 기본값으로 되돌린다 */
+    cfg->device_category = (cJSON_IsNumber(dev_category) &&
+                            dev_category->valueint >= 0 && dev_category->valueint <= 255)
+                               ? dev_category->valueint : ACU_DEFAULT_DEVICE_CATEGORY;
+    cfg->device_type = (cJSON_IsNumber(dev_type) &&
+                        dev_type->valueint >= 0 && dev_type->valueint <= 255)
+                           ? dev_type->valueint : ACU_DEFAULT_DEVICE_TYPE;
 
     /* 0 자체가 "타임아웃 없음"이라는 유효한 값이다 */
     if (cJSON_IsNumber(inactivity) &&

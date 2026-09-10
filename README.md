@@ -1105,6 +1105,79 @@ DM에서 저장한 뒤 다시 조회하면 0으로 보여 "저장이 안 됐나?
 
 `tools/nm_discover.py`도 유휴 타임아웃을 표시하도록 했다.
 
+### 5.5-3 완료 — 실제 DM과 IDTi TCP 개통 + IsTimeSync 구현 (2026-09-10)
+
+**5.5단계의 마지막 관문 통과.** DM에 장비를 등록하고 **출입 이벤트가 실제로 올라갔다.**
+
+#### 패킷을 떠서 본 실제 통신
+
+DM 등록 직후에는 "접속했다가 같은 초에 끊김"만 보여 실패로 오해했는데, `tcpdump`로 뜨고 보니
+**그것이 정상 동작**이었다. DM은 **연결을 유지하지 않고 폴링마다 새 TCP 연결을 열고 닫는다.**
+
+```
+DM 접속 -> 53byte 요청 -> 우리 280byte 응답 -> DM이 FIN -> 3초 뒤 반복
+```
+
+**DM이 보내는 53byte 요청** (2026-09-10 실측):
+
+```
+STX=02  Length=0x0035(53)  Version=02  FrameOption=0x8041  HeaderLen=0x2C(44)
+Dest=01 01 00 00   Broadcast=00 00 00 01   Src=01 01 01 01 01
+FrameIdx=1/1  Password=00000000
+Command=0x06(RequestData)  Sub=0x02  HeaderCS=0xDC
+DataType=01  Object=0x01(History)  Item=01~FF  Block=1/1/1
+Data = 26 09 10 05 13 19 30   <- BCD 시각 (2026-09-10 목 13:19:30)
+CS=08  ETX=03
+```
+
+| 응답 크기 | 뜻 |
+|-----------|-----|
+| **280byte** | 헤더 44 + Device Status 234 + Tail 2 — 이벤트 없음 |
+| **316byte** | 위 + Event 36 — **카드 이벤트가 실려 나간 것** |
+| **548byte** | 헤더 44 + Device Status 234 + Firmware 268 + Tail 2 — DM의 Firmware 조회 |
+
+- 548byte 응답이 실제로 오갔다는 것은 **`SendStatus(0x03)` 추정이 맞았다**는 뜻이다.
+  Command Table의 Send/Request 짝으로 추정했던 값이라 미검증으로 남아 있었다
+- 카드 주입 -> 다음 폴링에서 316byte -> **DM 화면에 이벤트 표시 확인**
+  (카드번호가 제대로 보이려면 사용자 등록이 선행돼야 한다 - 사용자 DB 동기화는 별도 작업)
+- 폴링마다 연결을 새로 여는 방식이라 **유휴 타임아웃(600초)은 사실상 발동할 일이 없다**
+
+#### 장치 식별자가 틀렸다 — 두 개의 다른 enum
+
+`clsDevParams.cs`에 이름이 헷갈리는 enum이 둘 있다.
+
+```
+DeviceType     (분류) : None=0, Host=1, ComSlot=2, Controller=3, Module=4, Reader=5 …
+ControllerType (모델) : SSC_312=31, SSC_314_AL4=32, SSC_324=33, ISC_101=41 …
+```
+
+우리가 보내던 `Category=0x00, DeviceType=0x29`는 **None / ISC-101**이었다.
+DM에 SSC-324로 등록했으므로 **`3`(Controller) / `33`(SSC_324)** 이 맞다.
+상수로 박지 않고 `config.json`의 `device_category` / `device_type`으로 뺐다 —
+등록 모델이 바뀔 수 있으므로 재빌드 없이 바꿀 수 있어야 한다.
+
+#### IsTimeSync 구현 — 고립망 시각 문제의 답
+
+`FrameOption = 0x8041` = `REQUEST_ACK | **TIME_SYNC** | TCP`.
+**DM은 폴링마다 IsTimeSync 비트를 켜고 자기 시각을 BCD 7byte로 보낸다.**
+
+이것이 아침에 찾은 RTC 문제의 실질적 해답이다. 현장은 외부와 끊긴 로컬망이라 NTP 서버가 없을 수 있고,
+이 보드의 RTC는 I2C 풀업 누락으로 죽어 있다. **그런데 상위 시스템이 3초마다 시각을 내려보내고 있었다.**
+
+- 2초 미만 차이는 무시 — 3초마다 시계를 건드리지 않기 위함
+- BCD 니블과 값 범위를 모두 검증 — 상대가 보낸 값이다
+- **응답보다 먼저 처리** — 응답에 실리는 Device Status와 Event가 현재 시각을 쓰므로
+  보정 후의 시각으로 답하는 편이 일관적이다
+- `time_sync_enabled` 설정으로 끌 수 있게 했다. **시각을 네트워크에서 받는 것은 신뢰 결정**이고,
+  시간대별 출입 제한을 쓰는 경우 시계를 옮기면 허용 시간이 바뀔 수 있다. 적용할 때마다 로그를 남긴다
+- 유닛에 **`CAP_SYS_TIME`** 추가 (root 대신 이 능력만)
+
+**검증**: 시계를 120초 뒤로 돌리고 NTP를 끈 뒤, 다음 폴링에서
+`상위 시스템 시각으로 121초 보정 -> 2026-09-10 13:30:08` 확인.
+
+**RTC 배터리는 여전히 있으면 좋다** — DM이 붙기 전 부팅 구간에는 여전히 시계가 틀리다.
+다만 **필수 의존은 아니게 됐다.**
+
 ## 빌드 & 실행
 
 ```bash

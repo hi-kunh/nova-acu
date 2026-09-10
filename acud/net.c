@@ -58,6 +58,20 @@ struct AcuNet {
      */
     int inactivity_seconds;
     struct timespec last_activity; /* CLOCK_MONOTONIC. client_fd가 유효할 때만 의미 있다 */
+
+    /*
+     * Device Status / Firmware Info의 앞 2byte. PC에 등록한 모델과 맞아야 하므로 설정으로 받는다
+     * (protocol.h의 IDTI_DEVICE_CATEGORY_* / IDTI_CONTROLLER_TYPE_* 참고).
+     */
+    int device_category;
+    int device_type;
+
+    /*
+     * 시각 동기화 (netmodule이 아니라 IDTi 프레임의 IsTimeSync 비트).
+     * DM은 폴링 요청마다 자기 시각을 실어 보낸다 - **고립망에서는 이것이 유일한 시각 공급원**이다
+     * (NTP 서버가 없고, 이 보드의 RTC는 I2C 풀업 누락으로 죽어 있다).
+     */
+    int time_sync_enabled;
 };
 
 /* 클라이언트가 뭔가를 했다고 표시한다 (접속/수신/송신) */
@@ -165,6 +179,9 @@ AcuNet *net_init(int port)
     net->door_status = IDTI_DOOR_STATUS_NONE;
     net->aux_fd = -1; /* calloc이 0으로 채우므로 명시적으로 -1을 넣어야 한다 */
     net->inactivity_seconds = 0; /* main이 설정값으로 덮어쓴다. 0이면 타임아웃 없음 */
+    net->device_category = IDTI_DEVICE_CATEGORY_DEFAULT;
+    net->device_type = IDTI_DEVICE_TYPE_DEFAULT;
+    net->time_sync_enabled = 0; /* main이 설정값으로 덮어쓴다 */
 
     net->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (net->listen_fd < 0)
@@ -286,13 +303,14 @@ void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int do
 
 /* Protocol V2 Device Status(234byte) = DeviceType(2)+CurDateTime(6)+ExistedModule(2)+IOModuleStatus(16*14).
  * 단일 도어/단일 리더 컨트롤러라 IO 확장 모듈이 없으므로 ExistedModule=0, 모듈 배열은 전부 0으로 채운다. */
-static void build_device_status(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], int door_status, time_t now)
+static void build_device_status(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], int door_status, time_t now,
+                                int category, int type)
 {
     (void)door_status; /* V2 Device Status 구조체 자체에는 도어 상태 필드가 없음(Event Info 쪽에만 존재) */
 
     memset(out, 0, IDTI_DEVICE_STATUS_V2_LEN);
-    out[0] = IDTI_DEVICE_CATEGORY;
-    out[1] = IDTI_DEVICE_TYPE;
+    out[0] = (uint8_t)category;
+    out[1] = (uint8_t)type;
 
     struct tm tmv;
     localtime_r(&now, &tmv);
@@ -311,11 +329,11 @@ static void build_device_status(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], int door
  * PC(DM)가 접속 후 장치를 확인할 때 쓰는 응답 데이터다
  * (근거: PC 소스 `isldev/clsDevDeviceSetting.cs`의 GetFirmwareInfo).
  */
-static void build_firmware_info(uint8_t out[IDTI_FIRMWARE_INFO_LEN])
+static void build_firmware_info(uint8_t out[IDTI_FIRMWARE_INFO_LEN], int category, int type)
 {
     memset(out, 0, IDTI_FIRMWARE_INFO_LEN);
-    out[0] = IDTI_DEVICE_CATEGORY;
-    out[1] = IDTI_DEVICE_TYPE;
+    out[0] = (uint8_t)category;
+    out[1] = (uint8_t)type;
     out[2] = IDTI_FW_VERSION_MAJOR;
     out[3] = IDTI_FW_VERSION_MINOR;
     out[4] = IDTI_FW_VERSION_PATCH;
@@ -380,7 +398,8 @@ static int send_response(AcuNet *net, const IdtiHeader *hdr,
     int exclude_status = (hdr->frame_option & IDTI_FOPT_EXCLUDE_DEVICE_STATUS) ? 1 : 0;
     if (!exclude_status)
     {
-        build_device_status(payload, net->door_status, time(NULL));
+        build_device_status(payload, net->door_status, time(NULL),
+                            net->device_category, net->device_type);
         payload_len = IDTI_DEVICE_STATUS_V2_LEN;
     }
     if (data_len > 0 && data != NULL)
@@ -418,6 +437,86 @@ static int send_response(AcuNet *net, const IdtiHeader *hdr,
 }
 
 /* Event Log(History, Object 0x01) 조회 요청 처리 */
+/* 시각을 바꿀 때 이 값보다 작은 차이는 무시한다. 매 폴링(3초)마다 시계를 건드리지 않기 위함 */
+#define NET_TIME_SYNC_MIN_DRIFT_SEC 2
+
+/*
+ * 요청에 실려 온 시각(BCD 7byte)으로 시스템 시계를 맞춘다.
+ *
+ * **왜 필요한가**: 설치 현장은 외부와 끊긴 로컬망이라 NTP 서버가 없을 수 있다. 그러면 시계를
+ * 맞출 방법이 상위 시스템(DM)뿐이다. IDTi 이벤트는 BCD 시각을 싣기 때문에 시계가 틀리면
+ * 출입 기록이 증거로서 무의미해진다.
+ *
+ * **주의**: 시각을 네트워크에서 받아들이는 것은 신뢰 결정이다. 시간대별 출입 제한을 쓰는 경우
+ * 시계를 옮기면 허용 시간이 바뀔 수 있으므로, 설정으로 끌 수 있게 해 두고 적용할 때마다 로그를 남긴다.
+ */
+static void apply_time_sync(AcuNet *net, const uint8_t *data, size_t data_len)
+{
+    if (!net->time_sync_enabled || data_len < IDTI_TIME_SYNC_LEN)
+    {
+        return;
+    }
+
+    int yy = idti_from_bcd(data[0]);
+    int mm = idti_from_bcd(data[1]);
+    int dd = idti_from_bcd(data[2]);
+    /* data[3]은 요일. 우리가 쓰지 않는다 */
+    int hh = idti_from_bcd(data[4]);
+    int mi = idti_from_bcd(data[5]);
+    int ss = idti_from_bcd(data[6]);
+
+    if (yy < 0 || mm < 1 || mm > 12 || dd < 1 || dd > 31 ||
+        hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 59)
+    {
+        log_msg("네트워크: 시각 동기화 값이 이상해 무시한다");
+        return;
+    }
+
+    struct tm tmv;
+    memset(&tmv, 0, sizeof(tmv));
+    tmv.tm_year  = 2000 + yy - 1900;
+    tmv.tm_mon   = mm - 1;
+    tmv.tm_mday  = dd;
+    tmv.tm_hour  = hh;
+    tmv.tm_min   = mi;
+    tmv.tm_sec   = ss;
+    tmv.tm_isdst = -1;
+
+    /* DM이 보내는 것은 지역 시각이다 (실제 패킷에서 KST와 일치하는 것을 확인했다) */
+    time_t want = mktime(&tmv);
+    if (want == (time_t)-1)
+    {
+        log_msg("네트워크: 시각 동기화 값을 시간으로 바꾸지 못했다");
+        return;
+    }
+
+    time_t now = time(NULL);
+    long drift = (long)(want - now);
+    if (drift > -NET_TIME_SYNC_MIN_DRIFT_SEC && drift < NET_TIME_SYNC_MIN_DRIFT_SEC)
+    {
+        return; /* 이미 맞다 */
+    }
+
+    struct timespec ts;
+    ts.tv_sec = want;
+    ts.tv_nsec = 0;
+
+    char line[200];
+    if (clock_settime(CLOCK_REALTIME, &ts) != 0)
+    {
+        snprintf(line, sizeof(line),
+                 "네트워크: 시각 동기화 실패 (%s) - 유닛에 CAP_SYS_TIME이 있는지 확인할 것",
+                 strerror(errno));
+        log_msg(line);
+        return;
+    }
+
+    snprintf(line, sizeof(line),
+             "네트워크: 상위 시스템 시각으로 %ld초 보정 -> %04d-%02d-%02d %02d:%02d:%02d",
+             drift, 2000 + yy, mm, dd, hh, mi, ss);
+    log_msg(line);
+}
+
 static void handle_history_request(AcuNet *net, const IdtiHeader *hdr)
 {
     uint8_t event[IDTI_EVENT_INFO_LEN];
@@ -464,15 +563,24 @@ static void handle_history_request(AcuNet *net, const IdtiHeader *hdr)
 static void handle_firmware_request(AcuNet *net, const IdtiHeader *hdr)
 {
     uint8_t firmware[IDTI_FIRMWARE_INFO_LEN];
-    build_firmware_info(firmware);
+    build_firmware_info(firmware, net->device_category, net->device_type);
 
     send_response(net, hdr, IDTI_CMD_SND_STATUS, IDTI_SUBCMD_READ, IDTI_OBJ_FIRMWARE,
                   firmware, sizeof(firmware),
                   1, 1, 1, IDTI_FIRMWARE_INFO_LEN);
 }
 
-static void handle_request(AcuNet *net, const IdtiHeader *hdr)
+static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
+    /*
+     * 시각 동기화를 응답보다 먼저 처리한다. 응답에 실리는 Device Status와 Event가 모두
+     * 현재 시각을 쓰므로, 보정 후의 시각으로 답하는 편이 일관적이다.
+     */
+    if (hdr->frame_option & IDTI_FOPT_TIME_SYNC)
+    {
+        apply_time_sync(net, pkt + IDTI_HEADER_LEN_V2, hdr->data_len);
+    }
+
     if (hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ &&
         hdr->object == IDTI_OBJ_HISTORY)
     {
@@ -498,6 +606,28 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr)
 int net_is_connected(const AcuNet *net)
 {
     return (net && net->client_fd >= 0) ? 1 : 0;
+}
+
+/*
+ * Device Status / Firmware Info에 실을 장치 식별자를 설정한다.
+ * PC에 등록한 모델과 맞아야 한다 (예: SSC-324로 등록했으면 category=3, type=33).
+ */
+void net_set_device_identity(AcuNet *net, int category, int type)
+{
+    if (net)
+    {
+        net->device_category = category;
+        net->device_type = type;
+    }
+}
+
+/* 상위 시스템이 보내는 시각으로 시계를 맞출지 설정한다 */
+void net_set_time_sync(AcuNet *net, int enabled)
+{
+    if (net)
+    {
+        net->time_sync_enabled = enabled ? 1 : 0;
+    }
 }
 
 /* 유휴 타임아웃(초)을 설정한다. 0이면 끈다 */
@@ -652,7 +782,7 @@ void net_poll(AcuNet *net, int timeout_ms)
                 break; /* 아직 패킷 전체가 도착하지 않음 */
             }
 
-            handle_request(net, &hdr);
+            handle_request(net, &hdr, pkt);
             consumed += hdr.packet_length;
         }
 

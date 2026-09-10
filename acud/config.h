@@ -18,6 +18,12 @@ typedef struct {
     char net_iface[16];      /* UDP 탐색 응답에 실을 네트워크 인터페이스 (MAC/IP/넷마스크를 여기서 읽는다) */
     char netcfg_request_path[256]; /* UDP 탐색의 SETT를 받아 적을 파일. root 쪽 acu-netcfg-apply가 집어 간다.
                                     * 빈 문자열이면 SETT를 거절한다 */
+    int  device_category;    /* Device Status/Firmware의 Category. clsDevParams.DeviceType 값.
+                              * Controller=3 (protocol.h의 IDTI_DEVICE_CATEGORY_* 참고) */
+    int  device_type;        /* 같은 곳의 DeviceType. clsDevParams.ControllerType 값.
+                              * SSC_324=33, ISC_101=41 등. **PC에 등록한 모델과 맞아야 한다** */
+    int  time_sync_enabled;  /* 상위 시스템이 보내는 시각으로 시계를 맞출지 (1=켬).
+                              * 고립망에는 NTP가 없을 수 있어 기본은 켬 */
     int  inactivity_seconds; /* 상위 시스템 연결의 유휴 타임아웃(초). netmodule InactivityTime.
                               * 0이면 끔. 2byte 필드라 0~65535. DM 기본값은 600(10분) */
     char discovery_sett_password[5]; /* UDP 탐색 SETT에 요구할 비밀번호(4자리).

@@ -4,5 +4,8 @@
     "admin_password": "0000",
     "tcp_port": 1004,
     "pid_path": "/run/acud/acud.pid",
-    "log_path": ""
+    "log_path": "",
+    "device_category": 3,
+    "device_type": 33,
+    "inactivity_seconds": 600
 }

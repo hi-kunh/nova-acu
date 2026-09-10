@@ -43,8 +43,11 @@ StandardError=journal
 
 # 포트 1004는 특권 포트(<1024)라 일반 사용자로는 bind가 안 된다.
 # root로 돌리는 대신 이 능력 하나만 준다
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# CAP_SYS_TIME이 필요한 이유: 상위 시스템(DM)이 폴링 요청마다 자기 시각을 실어 보내고,
+# 고립망에는 NTP 서버가 없을 수 있어 그것이 유일한 시각 공급원이다.
+# IDTi 이벤트는 BCD 시각을 싣기 때문에 시계가 틀리면 출입 기록이 증거로서 무의미해진다.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_TIME
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_TIME
 
 NoNewPrivileges=yes
 ProtectSystem=strict

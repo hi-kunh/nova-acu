@@ -76,10 +76,28 @@
 /*
  * 장치 식별자. Device Status / Firmware Info 모두 앞 2byte가 [0]=Category, [1]=DeviceType 이다
  * (근거: PC 소스 `isldev/clsDevStatus.cs`, `clsDevDeviceSetting.cs`).
- * Category 값은 아직 확정 전 - 0이 유효한지 확인 필요. DeviceType은 hal.h의 HAL_DEVICE_TYPE_ISC101과 대응.
+ *
+ * **두 값은 서로 다른 enum이다** (`isldev/clsDevParams.cs`, 2026-09-10 확인):
+ *
+ *   Category = clsDevParams.DeviceType — 무엇의 부류인가
+ *     None=0, Host=1, ComSlot=2, **Controller=3**, Module=4, Reader=5, OutPut=6, Input=7,
+ *     Controller_Elv=19
+ *
+ *   DeviceType = clsDevParams.ControllerType — 어느 모델인가
+ *     SSC_312=31, SSC_314_AL4=32, **SSC_324=33**, SSC_314_ECA=40,
+ *     ISC_101=41, ISC_201=42, ISC_301=43, ISC_401=44, ISC_201A=45, ISC_201PK=46, ISC_101A=47,
+ *     BSC_101=51 … BSC_101A=58
+ *
+ * 이전 값(Category=0, DeviceType=0x29)은 틀렸다. 0x29는 41 = **ISC_101**이고 Category 0은 None이다.
+ * 아래는 기본값이고, 실제로 보고할 값은 config.json의 `device_category`/`device_type`으로 바꾼다
+ * (등록하는 모델에 맞춰야 하므로 상수로 박아 두면 안 된다).
  */
-#define IDTI_DEVICE_CATEGORY 0x00
-#define IDTI_DEVICE_TYPE     0x29
+#define IDTI_DEVICE_CATEGORY_CONTROLLER 3   /* DeviceType.Controller */
+#define IDTI_CONTROLLER_TYPE_SSC_324    33  /* ControllerType.SSC_324 */
+#define IDTI_CONTROLLER_TYPE_ISC_101    41  /* ControllerType.ISC_101 (이전에 쓰던 값) */
+
+#define IDTI_DEVICE_CATEGORY_DEFAULT IDTI_DEVICE_CATEGORY_CONTROLLER
+#define IDTI_DEVICE_TYPE_DEFAULT     IDTI_CONTROLLER_TYPE_SSC_324
 
 /*
  * Firmware Info (Object 0x2A 응답 데이터):
@@ -100,6 +118,13 @@
 #define IDTI_FW_DATE_SECOND  0
 
 #define IDTI_EVENT_INFO_LEN 36        /* Event Info(Data) 크기 */
+
+/*
+ * 시각 동기화 payload. FrameOption에 IDTI_FOPT_TIME_SYNC가 켜져 있으면 요청 Data에 실려 온다.
+ * BCD 7byte: YY MM DD 요일 HH MM SS  (2026-09-10 13:19:30 목요일 -> 26 09 10 05 13 19 30)
+ * 2026-09-10 실제 DM 패킷에서 확인했다. 요일은 우리가 쓰지 않는다.
+ */
+#define IDTI_TIME_SYNC_LEN 7
 #define IDTI_DEVICE_STATUS_V2_LEN 234 /* Protocol V2 Device Status 크기 (10 + 16*14) */
 
 /* 파싱된 요청 헤더 (44byte 중 우리가 실제로 쓰는 필드만 native 타입으로 보관) */
@@ -151,5 +176,11 @@ int idti_build_packet(uint8_t *out, size_t out_cap,
 
 /* 8-bit 정수를 2자리 BCD(Binary Coded Decimal) 바이트로 변환한다 (0~99 범위) */
 uint8_t idti_to_bcd(int value);
+
+/*
+ * BCD 한 바이트를 정수로 되돌린다. 각 니블이 0~9가 아니면 -1.
+ * (요청에 실려 오는 시각을 읽을 때 쓴다 - 상대가 보낸 값이라 검증이 필요하다)
+ */
+int idti_from_bcd(uint8_t value);
 
 #endif /* ACU_PROTOCOL_H */
