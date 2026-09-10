@@ -17,6 +17,12 @@
 #define ACU_DEFAULT_LOG_PATH ""   /* 빈 문자열 = stdout */
 #define ACU_DEFAULT_NET_IFACE "eth0"
 #define ACU_DEFAULT_NETCFG_REQUEST_PATH "/run/acud/netcfg-request"
+/*
+ * 기본은 "비밀번호 요구 안 함"이다. 기존 IntelliScan Device Manager는 SETT에 비밀번호를
+ * 실어 보낼 수단이 아예 없다(UI에 입력란이 없고, 소스에서도 PassCustom을 채우지 않는다).
+ * 요구하도록 기본값을 잡으면 제품이 기존 도구로 설정되지 않는다.
+ */
+#define ACU_DEFAULT_SETT_PASSWORD ""
 
 void config_set_defaults(AcuConfig *cfg)
 {
@@ -29,6 +35,8 @@ void config_set_defaults(AcuConfig *cfg)
     snprintf(cfg->net_iface, sizeof(cfg->net_iface), "%s", ACU_DEFAULT_NET_IFACE);
     snprintf(cfg->netcfg_request_path, sizeof(cfg->netcfg_request_path), "%s",
              ACU_DEFAULT_NETCFG_REQUEST_PATH);
+    snprintf(cfg->discovery_sett_password, sizeof(cfg->discovery_sett_password), "%s",
+             ACU_DEFAULT_SETT_PASSWORD);
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -109,6 +117,8 @@ int config_load(const char *path, AcuConfig *cfg)
     const cJSON *net_iface = cJSON_GetObjectItemCaseSensitive(root, "net_iface");
     const cJSON *netcfg_request_path =
         cJSON_GetObjectItemCaseSensitive(root, "netcfg_request_path");
+    const cJSON *sett_password =
+        cJSON_GetObjectItemCaseSensitive(root, "discovery_sett_password");
 
     if (!cJSON_IsString(db_path) || db_path->valuestring[0] == '\0')
     {
@@ -184,6 +194,18 @@ int config_load(const char *path, AcuConfig *cfg)
     {
         snprintf(cfg->netcfg_request_path, sizeof(cfg->netcfg_request_path), "%s",
                  ACU_DEFAULT_NETCFG_REQUEST_PATH);
+    }
+
+    /* 빈 문자열 자체가 "비밀번호를 요구하지 않는다"는 유효한 값이다 */
+    if (cJSON_IsString(sett_password))
+    {
+        snprintf(cfg->discovery_sett_password, sizeof(cfg->discovery_sett_password), "%s",
+                 sett_password->valuestring);
+    }
+    else
+    {
+        snprintf(cfg->discovery_sett_password, sizeof(cfg->discovery_sett_password), "%s",
+                 ACU_DEFAULT_SETT_PASSWORD);
     }
 
     cJSON_Delete(root);

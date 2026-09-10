@@ -85,6 +85,7 @@ enum {
 
 /* PasswordSetFlag가 On일 때만 PC가 비밀번호를 실어 보낸다 */
 #define NM_PW_FLAG_ON  1
+#define NM_PW_FLAG_OFF 0
 #define NM_PW_COMPANY  "IDTi"   /* clsnmSettingFrame의 asciiCompanyFixedPasswordValue */
 
 /*
@@ -111,7 +112,7 @@ struct AcuDiscover {
     int      tcp_port;
     char     iface[IFNAMSIZ];
     unsigned ifindex;                 /* 0이면 인터페이스 필터를 걸지 않는다 */
-    char     admin_password[8];       /* SETT 인증에 쓴다 (config의 admin_password) */
+    char     sett_password[8];        /* SETT에 요구할 비밀번호. 빈 문자열이면 요구하지 않는다 */
     char     request_path[256];       /* SETT를 받아 적을 파일. 빈 문자열이면 SETT 거절 */
 };
 
@@ -354,8 +355,14 @@ static void build_frame(const AcuDiscover *d, const char *cmd4, unsigned char ou
     out[NM_OFF_FIRMWARE]     = NM_FW_MAJOR;
     out[NM_OFF_FIRMWARE + 1] = NM_FW_MINOR;
 
-    /* 비밀번호를 요구한다는 표시. 이게 0이면 PC가 비밀번호를 실어 보내지 않는다 */
-    out[NM_OFF_PW_SET_FLAG] = NM_PW_FLAG_ON;
+    /*
+     * 비밀번호를 실제로 요구할 때만 1로 보고한다.
+     * 기존 IntelliScan Device Manager는 이 값을 IMIN에서 읽어 SETT에 그대로 실어 보내지만,
+     * **Custom 비밀번호를 채울 수단이 없다**(UI에 입력란이 없고 소스에서도 대입하지 않는다).
+     * 그래서 우리가 1로 보고해도 도구는 Company("IDTi")만 보내고 Custom은 0으로 채운다.
+     * 요구하지 않을 때 1로 보고하는 것은 거짓말이므로 설정에 맞춰 정직하게 보고한다.
+     */
+    out[NM_OFF_PW_SET_FLAG] = (d->sett_password[0] != '\0') ? NM_PW_FLAG_ON : NM_PW_FLAG_OFF;
 }
 
 /* 255.255.255.255:5001 로 브로드캐스트 응답을 보낸다 */
@@ -403,12 +410,32 @@ static int sett_is_for_us(const AcuDiscover *d, const unsigned char *req)
 }
 
 /*
- * SETT의 비밀번호를 검증한다. 맞으면 0.
- * Company는 "IDTi" 고정이고, Custom은 config.json의 admin_password와 맞춰 본다
- * (둘 다 "단말기 비밀번호" 개념이라 같은 값을 쓴다).
+ * SETT의 비밀번호를 검증한다. 맞으면 0, 아니면 -1.
+ * 설정에 비밀번호가 없으면(기본) 아무것도 요구하지 않는다.
+ *
+ * **Company("IDTi")를 검사하지 않는 이유** (2026-09-10 실제 도구로 확인):
+ * 도구는 `SetPasswordCompany("IDTi", passSetFlag)`로 Company를 채우는데, 그 `passSetFlag`는
+ * **우리가 IMIN으로 보낸 값을 그대로 되돌려준 것**이다. 우리가 0을 보고하면 도구는 Company도
+ * 0으로 채워 보낸다. 즉 Company는 인증 수단이 아니라 우리 응답의 메아리라서 검사 대상이 못 된다.
+ *
+ * **Custom도 기본으로는 요구하지 않는 이유**: 기존 IntelliScan Device Manager는 Custom 비밀번호를
+ * 보낼 수단이 아예 없다. UI에 입력란이 없고, `frmNetworkModule.cs`가 `PassCustom`을 한 번도
+ * 대입하지 않으며, 비밀번호 설정 명령(`PASS`)은 소스에 `// Later~`만 있는 미구현 상태다.
+ * 요구하면 **제품이 기존 도구로 설정되지 않는다.**
+ *
+ * **그래서 실질적인 필터는 프레임 자체다**: 정확히 58byte이고, 명령이 `SETT`이고,
+ * **우리 MAC을 지목**해야 한다(`sett_is_for_us`). 고정 문자열보다 이쪽이 훨씬 강한 조건이다.
+ *
+ * 비밀번호를 설정하면 Custom 일치를 요구하고 IMIN의 PasswordSetFlag도 1로 보고한다.
+ * 그 대신 기존 Device Manager로는 SETT를 못 하게 되는 것을 감수한다는 뜻이 된다.
  */
 static int sett_password_ok(const AcuDiscover *d, const unsigned char *req)
 {
+    if (d->sett_password[0] == '\0')
+    {
+        return 0; /* 비밀번호를 요구하지 않는 설정 (기본) */
+    }
+
     if (memcmp(req + NM_OFF_PW_COMPANY, NM_PW_COMPANY, 4) != 0)
     {
         return -1;
@@ -418,7 +445,7 @@ static int sett_password_ok(const AcuDiscover *d, const unsigned char *req)
     memcpy(custom, req + NM_OFF_PW_CUSTOM, 4);
     custom[4] = '\0';
 
-    return (strncmp(custom, d->admin_password, 4) == 0) ? 0 : -1;
+    return (strncmp(custom, d->sett_password, 4) == 0) ? 0 : -1;
 }
 
 /*
@@ -532,7 +559,12 @@ static void handle_sett(AcuDiscover *d, const unsigned char *req, const char *wh
 
     if (sett_password_ok(d, req) != 0)
     {
-        snprintf(line, sizeof(line), "탐색: SETT 비밀번호가 맞지 않아 거절 (%s)", who);
+        snprintf(line, sizeof(line),
+                 "탐색: SETT 인증 실패로 거절 (%s)%s", who,
+                 (d->sett_password[0] != '\0')
+                     ? " - discovery_sett_password를 요구하는 설정이다. 기존 Device Manager는"
+                       " 비밀번호를 보낼 수단이 없으니 이 값을 비우면 통한다"
+                     : "");
         log_msg(line);
         send_set_reply(d, NM_CMD_FAIL);
         return;
@@ -592,7 +624,7 @@ static void load_config(AcuDiscover *d, const AcuConfig *cfg)
 {
     snprintf(d->iface, sizeof(d->iface), "%s",
              (cfg->net_iface[0] != '\0') ? cfg->net_iface : "eth0");
-    snprintf(d->admin_password, sizeof(d->admin_password), "%s", cfg->admin_password);
+    snprintf(d->sett_password, sizeof(d->sett_password), "%s", cfg->discovery_sett_password);
     snprintf(d->request_path, sizeof(d->request_path), "%s", cfg->netcfg_request_path);
     d->tcp_port = cfg->tcp_port;
 
