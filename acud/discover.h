@@ -33,6 +33,9 @@ void discover_shutdown(AcuDiscover *d);
 /* 설정 리로드(SIGHUP) 결과를 반영한다. 인터페이스가 바뀌면 다시 찾는다. */
 void discover_apply_config(AcuDiscover *d, const AcuConfig *cfg);
 
+/* 상위 시스템 연결 상태를 알려 준다 (IMIN의 Connect 필드에 실린다) */
+void discover_set_connected(AcuDiscover *d, int connected);
+
 /* select()에 넣을 수신 fd. d가 NULL이면 -1. */
 int discover_fd(const AcuDiscover *d);
 

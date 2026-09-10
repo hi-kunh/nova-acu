@@ -23,6 +23,9 @@
  * 요구하도록 기본값을 잡으면 제품이 기존 도구로 설정되지 않는다.
  */
 #define ACU_DEFAULT_SETT_PASSWORD ""
+/* DM이 보여 주는 기본값과 같은 값으로 맞춘다 (10분) */
+#define ACU_DEFAULT_INACTIVITY_SECONDS 600
+#define ACU_INACTIVITY_MAX 65535  /* 프레임의 2byte 필드 한계 */
 
 void config_set_defaults(AcuConfig *cfg)
 {
@@ -37,6 +40,7 @@ void config_set_defaults(AcuConfig *cfg)
              ACU_DEFAULT_NETCFG_REQUEST_PATH);
     snprintf(cfg->discovery_sett_password, sizeof(cfg->discovery_sett_password), "%s",
              ACU_DEFAULT_SETT_PASSWORD);
+    cfg->inactivity_seconds = ACU_DEFAULT_INACTIVITY_SECONDS;
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -119,6 +123,8 @@ int config_load(const char *path, AcuConfig *cfg)
         cJSON_GetObjectItemCaseSensitive(root, "netcfg_request_path");
     const cJSON *sett_password =
         cJSON_GetObjectItemCaseSensitive(root, "discovery_sett_password");
+    const cJSON *inactivity =
+        cJSON_GetObjectItemCaseSensitive(root, "inactivity_seconds");
 
     if (!cJSON_IsString(db_path) || db_path->valuestring[0] == '\0')
     {
@@ -194,6 +200,17 @@ int config_load(const char *path, AcuConfig *cfg)
     {
         snprintf(cfg->netcfg_request_path, sizeof(cfg->netcfg_request_path), "%s",
                  ACU_DEFAULT_NETCFG_REQUEST_PATH);
+    }
+
+    /* 0 자체가 "타임아웃 없음"이라는 유효한 값이다 */
+    if (cJSON_IsNumber(inactivity) &&
+        inactivity->valueint >= 0 && inactivity->valueint <= ACU_INACTIVITY_MAX)
+    {
+        cfg->inactivity_seconds = inactivity->valueint;
+    }
+    else
+    {
+        cfg->inactivity_seconds = ACU_DEFAULT_INACTIVITY_SECONDS;
     }
 
     /* 빈 문자열 자체가 "비밀번호를 요구하지 않는다"는 유효한 값이다 */

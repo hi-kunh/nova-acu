@@ -113,6 +113,10 @@ struct AcuDiscover {
     char     iface[IFNAMSIZ];
     unsigned ifindex;                 /* 0이면 인터페이스 필터를 걸지 않는다 */
     char     sett_password[8];        /* SETT에 요구할 비밀번호. 빈 문자열이면 요구하지 않는다 */
+    int      inactivity_seconds;      /* IMIN에 실을 InactivityTime */
+    int      connected;               /* 상위 시스템이 붙어 있는지. main이 카드 조회 주기(2초)마다 갱신하므로
+                                       * 최대 2초까지 실제 상태보다 늦을 수 있다. 사람이 조회하는
+                                       * 상태 필드라 이 정도 지연은 문제되지 않는다 */
     char     request_path[256];       /* SETT를 받아 적을 파일. 빈 문자열이면 SETT 거절 */
 };
 
@@ -352,8 +356,18 @@ static void build_frame(const AcuDiscover *d, const char *cmd4, unsigned char ou
     out[NM_OFF_SERIAL_STOPBIT] = NM_SERIAL_STOPBIT;
     out[NM_OFF_SERIAL_FLOW]    = NM_SERIAL_FLOW;
 
+    put_be16(out + NM_OFF_INACTIVITY, (unsigned)d->inactivity_seconds);
+
     out[NM_OFF_FIRMWARE]     = NM_FW_MAJOR;
     out[NM_OFF_FIRMWARE + 1] = NM_FW_MINOR;
+
+    /*
+     * DhcpMode는 0(고정) 고정이다. 우리는 DHCP를 지원하지 않는다 - 제품은 고정 IP를 쓰고,
+     * SETT의 DhcpMode도 적용하지 않는다. 지원하게 되면 그때 실제 상태를 채워야 한다.
+     */
+
+    /* 상위 시스템이 붙어 있는지 실제 상태를 보고한다 */
+    out[NM_OFF_CONNECT] = (unsigned char)(d->connected ? 1 : 0);
 
     /*
      * 비밀번호를 실제로 요구할 때만 1로 보고한다.
@@ -625,6 +639,7 @@ static void load_config(AcuDiscover *d, const AcuConfig *cfg)
     snprintf(d->iface, sizeof(d->iface), "%s",
              (cfg->net_iface[0] != '\0') ? cfg->net_iface : "eth0");
     snprintf(d->sett_password, sizeof(d->sett_password), "%s", cfg->discovery_sett_password);
+    d->inactivity_seconds = cfg->inactivity_seconds;
     snprintf(d->request_path, sizeof(d->request_path), "%s", cfg->netcfg_request_path);
     d->tcp_port = cfg->tcp_port;
 
@@ -720,6 +735,15 @@ void discover_apply_config(AcuDiscover *d, const AcuConfig *cfg)
     if (d)
     {
         load_config(d, cfg);
+    }
+}
+
+/* 상위 시스템 연결 상태를 알려 준다. IMIN의 Connect 필드에 실린다 */
+void discover_set_connected(AcuDiscover *d, int connected)
+{
+    if (d)
+    {
+        d->connected = connected;
     }
 }
 

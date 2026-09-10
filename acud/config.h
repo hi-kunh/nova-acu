@@ -18,6 +18,8 @@ typedef struct {
     char net_iface[16];      /* UDP 탐색 응답에 실을 네트워크 인터페이스 (MAC/IP/넷마스크를 여기서 읽는다) */
     char netcfg_request_path[256]; /* UDP 탐색의 SETT를 받아 적을 파일. root 쪽 acu-netcfg-apply가 집어 간다.
                                     * 빈 문자열이면 SETT를 거절한다 */
+    int  inactivity_seconds; /* 상위 시스템 연결의 유휴 타임아웃(초). netmodule InactivityTime.
+                              * 0이면 끔. 2byte 필드라 0~65535. DM 기본값은 600(10분) */
     char discovery_sett_password[5]; /* UDP 탐색 SETT에 요구할 비밀번호(4자리).
                                       * 빈 문자열이면 요구하지 않는다 - 기존 IntelliScan Device Manager는
                                       * 비밀번호를 보낼 수단이 없어서, 요구하면 SETT가 통하지 않는다 */

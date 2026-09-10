@@ -40,6 +40,16 @@ void net_set_aux_reader(AcuNet *net, int fd, void (*on_readable)(void *user), vo
  */
 void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status);
 
+/* 상위 시스템이 지금 붙어 있는지 (netmodule IMIN의 Connect 필드에 실린다). net이 NULL이면 0 */
+int net_is_connected(const AcuNet *net);
+
+/*
+ * 유휴 타임아웃(초)을 설정한다. 0이면 끈다.
+ * netmodule의 InactivityTime에 대응한다 - 그 시간 동안 클라이언트 활동이 없으면 소켓을 닫는다.
+ * 케이블만 빠진 것처럼 상대가 조용히 사라지면 TCP는 한참 뒤에야 알아채므로 직접 정리한다.
+ */
+void net_set_inactivity_timeout(AcuNet *net, int seconds);
+
 /* 현재 도어 센서 상태를 갱신한다 (Device Status 응답에 사용, IDTI_DOOR_STATUS_* 값) */
 void net_set_door_status(AcuNet *net, int door_status);
 

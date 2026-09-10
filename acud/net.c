@@ -50,7 +50,21 @@ struct AcuNet {
     int   aux_fd;
     void (*aux_on_readable)(void *user);
     void *aux_user;
+
+    /*
+     * 유휴 타임아웃 (netmodule의 InactivityTime, 초). 0이면 끄기.
+     * 케이블만 빠진 것처럼 상대가 조용히 사라지면 TCP는 한참 뒤에야 알아챈다.
+     * 그동안 연결이 살아 있는 것처럼 남아 있으므로 직접 정리한다.
+     */
+    int inactivity_seconds;
+    struct timespec last_activity; /* CLOCK_MONOTONIC. client_fd가 유효할 때만 의미 있다 */
 };
+
+/* 클라이언트가 뭔가를 했다고 표시한다 (접속/수신/송신) */
+static void net_touch_activity(AcuNet *net)
+{
+    clock_gettime(CLOCK_MONOTONIC, &net->last_activity);
+}
 
 static void set_nonblocking(int fd)
 {
@@ -150,6 +164,7 @@ AcuNet *net_init(int port)
     net->client_fd = -1;
     net->door_status = IDTI_DOOR_STATUS_NONE;
     net->aux_fd = -1; /* calloc이 0으로 채우므로 명시적으로 -1을 넣어야 한다 */
+    net->inactivity_seconds = 0; /* main이 설정값으로 덮어쓴다. 0이면 타임아웃 없음 */
 
     net->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (net->listen_fd < 0)
@@ -479,6 +494,21 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr)
     log_msg(line);
 }
 
+/* 상위 시스템이 지금 붙어 있는지. netmodule IMIN의 Connect 필드에 실린다 */
+int net_is_connected(const AcuNet *net)
+{
+    return (net && net->client_fd >= 0) ? 1 : 0;
+}
+
+/* 유휴 타임아웃(초)을 설정한다. 0이면 끈다 */
+void net_set_inactivity_timeout(AcuNet *net, int seconds)
+{
+    if (net)
+    {
+        net->inactivity_seconds = (seconds > 0) ? seconds : 0;
+    }
+}
+
 void net_set_aux_reader(AcuNet *net, int fd, void (*on_readable)(void *user), void *user)
 {
     if (!net)
@@ -528,6 +558,26 @@ void net_poll(AcuNet *net, int timeout_ms)
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
     int rc = select(maxfd + 1, &readfds, &writefds, NULL, &tv);
+
+    /*
+     * 유휴 타임아웃 검사. select가 timeout으로 깨어난 경우에도 해야 하므로 rc 검사보다 앞에 둔다.
+     * (아무 일도 일어나지 않는 것이 바로 우리가 잡으려는 상황이다)
+     */
+    if (net->client_fd >= 0 && net->inactivity_seconds > 0)
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long idle = now.tv_sec - net->last_activity.tv_sec;
+        if (idle >= net->inactivity_seconds)
+        {
+            char line[160];
+            snprintf(line, sizeof(line),
+                     "네트워크: %ld초 동안 조용해 연결을 닫는다 (InactivityTime %d초)",
+                     idle, net->inactivity_seconds);
+            net_drop_client(net, line);
+        }
+    }
+
     if (rc <= 0)
     {
         return;
@@ -554,6 +604,7 @@ void net_poll(AcuNet *net, int timeout_ms)
             }
             set_nonblocking(new_fd);
             net->client_fd = new_fd;
+            net_touch_activity(net);
             net->recv_len = 0;
             net->send_len = 0;
             net->send_off = 0;
@@ -575,6 +626,7 @@ void net_poll(AcuNet *net, int timeout_ms)
             return;
         }
         net->recv_len += (size_t)n;
+        net_touch_activity(net);
 
         size_t consumed = 0;
         while (net->recv_len - consumed >= IDTI_HEADER_LEN_V2)

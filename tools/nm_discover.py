@@ -134,6 +134,8 @@ def show(info, addr, raw=None):
     bps = BPS.get(info["serial_bps"], f"코드 {info['serial_bps']}")
     print(f"  (시리얼)     {bps}bps {info['databit']}-{info['parity']}-{info['stopbit']}"
           "   <- 시리얼-이더넷 모듈 시절 잔재. 우리 장비에선 의미 없음")
+    print(f"  유휴 타임아웃  {info['inactivity']}초" +
+          ("  (0=끔)" if info["inactivity"] == 0 else ""))
     print(f"  DHCP={info['dhcp']} UDP={info['udp']} Connect={info['connect']} PwSet={info['pw_set']}")
     if raw is not None:
         print(f"  raw({len(raw)}) {raw.hex()}")
