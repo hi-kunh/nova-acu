@@ -309,8 +309,8 @@ void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int do
 /*
  * I/O 구성을 Device Status의 모듈 배열에 채운다.
  *
- * 모듈 하나는 14슬롯을 순서대로 채운다: 카드리더 -> 입력 -> 출력 -> 공통입력.
- * 마지막 공통입력 2개는 **화재/알람**으로, IO 보드에 직접 붙기 때문에 모듈마다 공통으로 들어간다.
+ * 모듈 하나는 14슬롯을 순서대로 채운다: 카드리더 -> 입력 -> 출력 -> 알람·화재.
+ * 마지막 2개는 **알람·화재** 입력이다. 보드 공통 입력의 사본이 아니라 모듈마다 실제로 배선된 입력이다.
  *
  * **DM은 이 정보를 받아야 장치 트리(카테고리)를 만든다.** 전부 0으로 보고하면 리더도 입출력도
  * 없는 장치로 보여 사용자·도어 설정을 내려보내지 못한다.
@@ -325,7 +325,7 @@ static void fill_modules(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], const AcuModule
         { layout->readers,       IDTI_IOTYPE_PROXIMITY_READER },
         { layout->inputs,        IDTI_IOTYPE_INPUT_SENSOR     },
         { layout->outputs,       IDTI_IOTYPE_OUTPUT_RELAY     },
-        { layout->common_inputs, IDTI_IOTYPE_INPUT_SENSOR     }, /* 화재/알람 */
+        { layout->common_inputs, IDTI_IOTYPE_INPUT_SENSOR     }, /* 알람·화재 (모듈마다 배선) */
     };
 
     int module_count = layout->module_count;

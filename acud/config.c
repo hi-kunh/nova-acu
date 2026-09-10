@@ -31,7 +31,7 @@
 /* 고립망에는 NTP 서버가 없을 수 있다. 상위 시스템이 유일한 시각 공급원이므로 기본은 켬 */
 #define ACU_DEFAULT_TIME_SYNC 1
 
-/* 모듈 4개 x 14슬롯 (리더2 + 입력6 + 출력4 + 공통입력2) = 리더8 / 입력24 / 출력16 */
+/* 모듈 4개 x 14슬롯 (리더2 + 입력6 + 출력4 + 알람·화재2) = 리더8 / 입력32 / 출력16 */
 #define ACU_DEFAULT_MODULE_INSTALL_TYPE IDTI_MODULE_INSTALL_EXTERNAL
 /* ModuleType은 아직 확정 전이다. DM 화면을 보고 맞춰야 한다 */
 #define ACU_DEFAULT_MODULE_TYPE IDTI_MODULE_TYPE_RXM_132
