@@ -104,6 +104,50 @@ def build_request(command, sub_command, obj,
     return bytes(p) + data + bytes([PACKET_CHECKSUM_FIXED, ETX])
 
 
+# Device Status의 모듈 배열 (근거: PC 소스 isldev/clsDevStatus.cs)
+#   [8..9]  IsExistModule  빅엔디안 16bit, 모듈 N = bit N
+#   [10..]  모듈 14개 x 16byte = ModuleIOType(1) + InstallType(1) + IOStatus(14)
+#   IOStatus 각 바이트 = 상위 니블 IOType + 하위 니블 IOStatus
+MODULE_COUNT = 14
+MODULE_ENTRY_LEN = 16
+MODULE_ARRAY_OFFSET = 10
+
+IO_TYPE_NAME = {0: "-", 1: "지문리더", 2: "카드리더", 3: "입력", 4: "출력"}
+IO_STATUS_NAME = {0: "N/A", 1: "Active", 2: "Inactive", 3: "LineOpen", 4: "LineShort"}
+INSTALL_NAME = {0: "None", 1: "Internal", 2: "External"}
+
+
+def describe_modules(ds):
+    """Device Status에서 모듈 구성을 사람이 읽을 수 있게 풀어 준다."""
+    lines = []
+    existed = int.from_bytes(ds[8:10], "big")
+    total = {}
+
+    for i in range(MODULE_COUNT):
+        if not (existed >> i) & 1:
+            continue
+        base = MODULE_ARRAY_OFFSET + i * MODULE_ENTRY_LEN
+        mtype = ds[base]
+        install = ds[base + 1]
+        io = ds[base + 2:base + MODULE_ENTRY_LEN]
+
+        # DM 문서(devmoduleNiocategory)와 같은 형태: 슬롯 14칸의 종류 니블을 이어 붙인 문자열
+        category = "".join(str((b >> 4) & 0x0F) for b in io)
+        for b in io:
+            t = (b >> 4) & 0x0F
+            if t != 0:
+                total[t] = total.get(t, 0) + 1
+        lines.append(f"    모듈{i + 1}: type={mtype} {INSTALL_NAME.get(install, install)} "
+                     f"iocategory={category}")
+
+    if total:
+        summary = ", ".join(f"{IO_TYPE_NAME.get(t, t)} {n}" for t, n in sorted(total.items()))
+        lines.append(f"    합계: {summary}")
+    else:
+        lines.append("    모듈 없음 (DM이 장치 트리를 만들지 못한다)")
+    return lines
+
+
 def bcd(byte):
     return (byte >> 4) * 10 + (byte & 0x0F)
 
@@ -147,6 +191,7 @@ def parse_response(pkt):
                    f"시각=20{bcd(ds[2]):02d}-{bcd(ds[3]):02d}-{bcd(ds[4]):02d} "
                    f"{bcd(ds[5]):02d}:{bcd(ds[6]):02d}:{bcd(ds[7]):02d} "
                    f"ExistedModule=0x{int.from_bytes(ds[8:10], 'big'):04x}")
+        out.extend(describe_modules(ds))
         body = body[DEVICE_STATUS_V2_LEN:]
     else:
         out.append(f"  [Device Status] 없음 (body {len(body)}byte)")

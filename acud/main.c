@@ -50,6 +50,20 @@ static void print_usage(const char *argv0)
             argv0, DEFAULT_CONFIG_PATH);
 }
 
+/* config의 I/O 구성 값을 net에 넘긴다 (여러 곳에서 같은 일을 하므로 한 곳으로 모았다) */
+static void apply_module_layout(AcuNet *net, const AcuConfig *cfg)
+{
+    AcuModuleLayout layout;
+    layout.module_count = cfg->module_count;
+    layout.readers = cfg->module_readers;
+    layout.inputs = cfg->module_inputs;
+    layout.outputs = cfg->module_outputs;
+    layout.common_inputs = cfg->module_common_inputs;
+    layout.module_type = cfg->module_type;
+    layout.install_type = cfg->module_install_type;
+    net_set_module_layout(net, &layout);
+}
+
 /* net_poll의 select가 탐색 소켓을 읽을 수 있다고 알려줄 때 불린다 */
 static void on_discover_readable(void *user)
 {
@@ -194,6 +208,7 @@ int main(int argc, char **argv)
     net_set_inactivity_timeout(net, cfg.inactivity_seconds);
     net_set_device_identity(net, cfg.device_category, cfg.device_type);
     net_set_time_sync(net, cfg.time_sync_enabled);
+    apply_module_layout(net, &cfg);
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
     AcuDiscover *disc = discover_init(&cfg);
@@ -261,6 +276,7 @@ int main(int argc, char **argv)
                         net_set_inactivity_timeout(net, new_cfg.inactivity_seconds);
                         net_set_device_identity(net, new_cfg.device_category, new_cfg.device_type);
                         net_set_time_sync(net, new_cfg.time_sync_enabled);
+                        apply_module_layout(net, &new_cfg);
                         if (disc)
                         {
                             net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
@@ -279,6 +295,7 @@ int main(int argc, char **argv)
                 net_set_inactivity_timeout(net, cfg.inactivity_seconds);
                 net_set_device_identity(net, cfg.device_category, cfg.device_type);
                 net_set_time_sync(net, cfg.time_sync_enabled);
+                apply_module_layout(net, &cfg);
                 log_msg("설정 리로드 완료");
             }
             else

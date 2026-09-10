@@ -11,6 +11,27 @@
 
 typedef struct AcuNet AcuNet;
 
+/*
+ * 상위 시스템에 보고할 I/O 구성. **DM은 이걸 받아야 장치 트리(카테고리)를 만든다** —
+ * 전부 0으로 보고하면 리더/입출력이 없는 장치로 보여 사용자·도어 설정을 내려보내지 못한다.
+ *
+ * 모듈 하나는 14슬롯을 꽉 채운다: 리더2 + 입력6 + 출력4 + 공통입력2.
+ * 모듈 4개면 리더 8 / 입력 24 / 출력 16 으로 RRU 구성과 맞는다.
+ * ModuleType 코드는 아직 확정 전이라 설정으로 받는다 (protocol.h의 IDTI_MODULE_TYPE_* 참고).
+ */
+typedef struct {
+    int module_count;    /* 보고할 모듈 개수 */
+    int readers;         /* 모듈당 카드리더 */
+    int inputs;          /* 모듈당 입력 */
+    int outputs;         /* 모듈당 출력 */
+    int common_inputs;   /* 모듈당 공통 입력 (화재/알람). IO 보드에 직접 붙는다 */
+    int module_type;     /* clsDevParams.ModuleType */
+    int install_type;    /* IDTI_MODULE_INSTALL_* */
+} AcuModuleLayout;
+
+/* 보고할 I/O 구성을 설정한다 */
+void net_set_module_layout(AcuNet *net, const AcuModuleLayout *layout);
+
 /* TCP 서버를 초기화한다 (지정한 port로 listen). 실패 시 NULL (네트워크 없이도 출입 판정은 계속 동작해야 함). */
 AcuNet *net_init(int port);
 

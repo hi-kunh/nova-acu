@@ -125,6 +125,67 @@
  * 2026-09-10 실제 DM 패킷에서 확인했다. 요일은 우리가 쓰지 않는다.
  */
 #define IDTI_TIME_SYNC_LEN 7
+
+/*
+ * Device Status V2의 모듈 구성 (근거: PC 소스 `isldev/clsDevStatus.cs`, 2026-09-10 확인)
+ *
+ *   [0]     DeviceCategory   1
+ *   [1]     DeviceType       1
+ *   [2..7]  DateTime         6 (BCD)
+ *   [8..9]  IsExistModule    2   <- 모듈 존재 비트. **빅엔디안 16bit, 모듈 N = bit N (LSB가 모듈 0)**
+ *   [10..]  모듈 14개 x 16byte = ModuleIOType(1) + ModuleInstallType(1) + IOStatus(14)
+ *
+ * 합계 10 + 14*16 = 234 = IDTI_DEVICE_STATUS_V2_LEN
+ *
+ * IOStatus 각 바이트는 **상위 니블 = IOType, 하위 니블 = IOStatus** 로 두 값을 담는다.
+ */
+#define IDTI_MODULE_COUNT_V2      14  /* clsDevStatus.countDeviceModule */
+#define IDTI_MODULE_ENTRY_LEN     16  /* IOType 1 + InstallType 1 + IOStatus 14 */
+#define IDTI_MODULE_IO_SLOTS      14  /* 모듈 하나가 담을 수 있는 I/O 개수 */
+#define IDTI_MODULE_ARRAY_OFFSET  10  /* Device Status에서 모듈 배열이 시작하는 위치 */
+
+/* clsDevParams.IOType */
+#define IDTI_IOTYPE_NONE             0
+#define IDTI_IOTYPE_TEMPLATE_READER  1
+#define IDTI_IOTYPE_PROXIMITY_READER 2
+#define IDTI_IOTYPE_INPUT_SENSOR     3
+#define IDTI_IOTYPE_OUTPUT_RELAY     4
+
+/* clsDevParams.IOStatus */
+#define IDTI_IOSTATUS_NONE     0
+#define IDTI_IOSTATUS_ACTIVE   1
+#define IDTI_IOSTATUS_INACTIVE 2
+
+/* clsDevParams.ModuleInstallType */
+#define IDTI_MODULE_INSTALL_NONE     0
+#define IDTI_MODULE_INSTALL_INTERNAL 1
+#define IDTI_MODULE_INSTALL_EXTERNAL 2
+
+/*
+ * clsDevParams.ModuleType. 접미사 004/008/00C는 I/O 개수(4/8/12)로 보인다.
+ * **우리 RRU가 이 중 무엇에 대응하는지는 아직 확정 전이라 config로 뺐다** (미확인 문서
+ * `8. System Device Reader Setup` 확인 필요). 기본값은 8채널 계열로 잡았다.
+ */
+#define IDTI_MODULE_TYPE_RIM_008 92   /* Reader 계열 8채널 */
+#define IDTI_MODULE_TYPE_ROM_008 102  /* Output 계열 8채널 */
+#define IDTI_MODULE_TYPE_RRM_008 112
+#define IDTI_MODULE_TYPE_RXM_132 123  /* 접미사가 (리더1, 입력3, 출력2)로 읽힌다 */
+
+/*
+ * 모듈 하나의 I/O 슬롯 구성 (2026-09-10 확정). 14슬롯을 꽉 채운다.
+ *
+ *   slot 0..1   카드리더 2
+ *   slot 2..7   입력 6
+ *   slot 8..11  출력 4
+ *   slot 12..13 공통입력 2  <- **화재 / 알람**. IO 보드에 직접 붙는 입력이라 모듈마다 공통이다
+ *
+ * 모듈 4개 -> 리더 8 / 입력 24 / 출력 16 으로 RRU 구성과 맞아떨어진다.
+ */
+#define IDTI_MODULE_DEFAULT_COUNT          4
+#define IDTI_MODULE_DEFAULT_READERS        2
+#define IDTI_MODULE_DEFAULT_INPUTS         6
+#define IDTI_MODULE_DEFAULT_OUTPUTS        4
+#define IDTI_MODULE_DEFAULT_COMMON_INPUTS  2
 #define IDTI_DEVICE_STATUS_V2_LEN 234 /* Protocol V2 Device Status 크기 (10 + 16*14) */
 
 /* 파싱된 요청 헤더 (44byte 중 우리가 실제로 쓰는 필드만 native 타입으로 보관) */

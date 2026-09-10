@@ -22,6 +22,19 @@ typedef struct {
                               * Controller=3 (protocol.h의 IDTI_DEVICE_CATEGORY_* 참고) */
     int  device_type;        /* 같은 곳의 DeviceType. clsDevParams.ControllerType 값.
                               * SSC_324=33, ISC_101=41 등. **PC에 등록한 모델과 맞아야 한다** */
+    /*
+     * 상위 시스템에 보고할 I/O 구성. **DM은 이걸 받아야 장치 트리(카테고리)를 만든다.**
+     * 모듈 하나는 14슬롯을 꽉 채운다: 리더2 + 입력6 + 출력4 + 공통입력2(화재/알람).
+     * 모듈 4개 -> 리더 8 / 입력 24 / 출력 16. **확장보드는 쓰지 않으므로 이것이 전부다.**
+     */
+    int  module_count;
+    int  module_readers;
+    int  module_inputs;
+    int  module_outputs;
+    int  module_common_inputs; /* 화재/알람. IO 보드에 직접 붙어 모듈마다 공통 */
+    int  module_type;          /* clsDevParams.ModuleType. 아직 확정 전이라 설정으로 뺐다 */
+    int  module_install_type;  /* 1=Internal, 2=External */
+
     int  time_sync_enabled;  /* 상위 시스템이 보내는 시각으로 시계를 맞출지 (1=켬).
                               * 고립망에는 NTP가 없을 수 있어 기본은 켬 */
     int  inactivity_seconds; /* 상위 시스템 연결의 유휴 타임아웃(초). netmodule InactivityTime.

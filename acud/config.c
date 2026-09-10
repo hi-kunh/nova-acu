@@ -30,6 +30,11 @@
 #define ACU_DEFAULT_INACTIVITY_SECONDS 600
 /* 고립망에는 NTP 서버가 없을 수 있다. 상위 시스템이 유일한 시각 공급원이므로 기본은 켬 */
 #define ACU_DEFAULT_TIME_SYNC 1
+
+/* 모듈 4개 x 14슬롯 (리더2 + 입력6 + 출력4 + 공통입력2) = 리더8 / 입력24 / 출력16 */
+#define ACU_DEFAULT_MODULE_INSTALL_TYPE IDTI_MODULE_INSTALL_EXTERNAL
+/* ModuleType은 아직 확정 전이다. DM 화면을 보고 맞춰야 한다 */
+#define ACU_DEFAULT_MODULE_TYPE IDTI_MODULE_TYPE_RXM_132
 #define ACU_INACTIVITY_MAX 65535  /* 프레임의 2byte 필드 한계 */
 
 void config_set_defaults(AcuConfig *cfg)
@@ -49,6 +54,27 @@ void config_set_defaults(AcuConfig *cfg)
     cfg->device_category = ACU_DEFAULT_DEVICE_CATEGORY;
     cfg->device_type = ACU_DEFAULT_DEVICE_TYPE;
     cfg->time_sync_enabled = ACU_DEFAULT_TIME_SYNC;
+    cfg->module_count = IDTI_MODULE_DEFAULT_COUNT;
+    cfg->module_readers = IDTI_MODULE_DEFAULT_READERS;
+    cfg->module_inputs = IDTI_MODULE_DEFAULT_INPUTS;
+    cfg->module_outputs = IDTI_MODULE_DEFAULT_OUTPUTS;
+    cfg->module_common_inputs = IDTI_MODULE_DEFAULT_COMMON_INPUTS;
+    cfg->module_type = ACU_DEFAULT_MODULE_TYPE;
+    cfg->module_install_type = ACU_DEFAULT_MODULE_INSTALL_TYPE;
+}
+
+/*
+ * 선택적인 정수 필드를 읽는다. 없거나 범위를 벗어나면 기본값을 쓴다.
+ * (같은 형태가 여럿이라 한 곳으로 모았다)
+ */
+static int read_int_field(const cJSON *root, const char *name, int min, int max, int fallback)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+    if (cJSON_IsNumber(item) && item->valueint >= min && item->valueint <= max)
+    {
+        return item->valueint;
+    }
+    return fallback;
 }
 
 /* 정확히 숫자 4자리 문자열인지 확인한다 */
@@ -226,6 +252,25 @@ int config_load(const char *path, AcuConfig *cfg)
     {
         cfg->time_sync_enabled = ACU_DEFAULT_TIME_SYNC;
     }
+
+    /*
+     * I/O 구성. 모듈 하나에 IDTI_MODULE_IO_GROUP(8)개씩 담고 모듈은 최대
+     * IDTI_MODULE_COUNT_V2(14)개라 총 112개까지 표현할 수 있다.
+     */
+    cfg->module_count =
+        read_int_field(root, "module_count", 0, IDTI_MODULE_COUNT_V2, IDTI_MODULE_DEFAULT_COUNT);
+    cfg->module_readers =
+        read_int_field(root, "module_readers", 0, IDTI_MODULE_IO_SLOTS, IDTI_MODULE_DEFAULT_READERS);
+    cfg->module_inputs =
+        read_int_field(root, "module_inputs", 0, IDTI_MODULE_IO_SLOTS, IDTI_MODULE_DEFAULT_INPUTS);
+    cfg->module_outputs =
+        read_int_field(root, "module_outputs", 0, IDTI_MODULE_IO_SLOTS, IDTI_MODULE_DEFAULT_OUTPUTS);
+    cfg->module_common_inputs =
+        read_int_field(root, "module_common_inputs", 0, IDTI_MODULE_IO_SLOTS,
+                       IDTI_MODULE_DEFAULT_COMMON_INPUTS);
+    cfg->module_type = read_int_field(root, "module_type", 0, 255, ACU_DEFAULT_MODULE_TYPE);
+    cfg->module_install_type =
+        read_int_field(root, "module_install_type", 0, 2, ACU_DEFAULT_MODULE_INSTALL_TYPE);
 
     /* 1byte 필드다. 범위를 벗어나면 기본값으로 되돌린다 */
     cfg->device_category = (cJSON_IsNumber(dev_category) &&

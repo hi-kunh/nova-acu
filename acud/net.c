@@ -72,6 +72,8 @@ struct AcuNet {
      * (NTP 서버가 없고, 이 보드의 RTC는 I2C 풀업 누락으로 죽어 있다).
      */
     int time_sync_enabled;
+
+    AcuModuleLayout layout; /* 상위 시스템에 보고할 I/O 구성 */
 };
 
 /* 클라이언트가 뭔가를 했다고 표시한다 (접속/수신/송신) */
@@ -182,6 +184,7 @@ AcuNet *net_init(int port)
     net->device_category = IDTI_DEVICE_CATEGORY_DEFAULT;
     net->device_type = IDTI_DEVICE_TYPE_DEFAULT;
     net->time_sync_enabled = 0; /* main이 설정값으로 덮어쓴다 */
+    /* layout은 calloc으로 0이다. main이 설정값으로 채운다 */
 
     net->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (net->listen_fd < 0)
@@ -303,8 +306,63 @@ void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int do
 
 /* Protocol V2 Device Status(234byte) = DeviceType(2)+CurDateTime(6)+ExistedModule(2)+IOModuleStatus(16*14).
  * 단일 도어/단일 리더 컨트롤러라 IO 확장 모듈이 없으므로 ExistedModule=0, 모듈 배열은 전부 0으로 채운다. */
+/*
+ * I/O 구성을 Device Status의 모듈 배열에 채운다.
+ *
+ * 모듈 하나는 14슬롯을 순서대로 채운다: 카드리더 -> 입력 -> 출력 -> 공통입력.
+ * 마지막 공통입력 2개는 **화재/알람**으로, IO 보드에 직접 붙기 때문에 모듈마다 공통으로 들어간다.
+ *
+ * **DM은 이 정보를 받아야 장치 트리(카테고리)를 만든다.** 전부 0으로 보고하면 리더도 입출력도
+ * 없는 장치로 보여 사용자·도어 설정을 내려보내지 못한다.
+ */
+static void fill_modules(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], const AcuModuleLayout *layout)
+{
+    /* 한 모듈 안에서 채울 순서 */
+    const struct {
+        int count;
+        int io_type;
+    } slots[] = {
+        { layout->readers,       IDTI_IOTYPE_PROXIMITY_READER },
+        { layout->inputs,        IDTI_IOTYPE_INPUT_SENSOR     },
+        { layout->outputs,       IDTI_IOTYPE_OUTPUT_RELAY     },
+        { layout->common_inputs, IDTI_IOTYPE_INPUT_SENSOR     }, /* 화재/알람 */
+    };
+
+    int module_count = layout->module_count;
+    if (module_count > IDTI_MODULE_COUNT_V2)
+    {
+        module_count = IDTI_MODULE_COUNT_V2;
+    }
+
+    unsigned existed = 0;
+
+    for (int m = 0; m < module_count; m++)
+    {
+        uint8_t *entry = out + IDTI_MODULE_ARRAY_OFFSET + m * IDTI_MODULE_ENTRY_LEN;
+        entry[0] = (uint8_t)layout->module_type;
+        entry[1] = (uint8_t)layout->install_type;
+
+        int slot = 0;
+        for (size_t g = 0; g < sizeof(slots) / sizeof(slots[0]); g++)
+        {
+            for (int i = 0; i < slots[g].count && slot < IDTI_MODULE_IO_SLOTS; i++, slot++)
+            {
+                /* 상위 니블 = IOType, 하위 니블 = IOStatus */
+                entry[2 + slot] = (uint8_t)((slots[g].io_type << 4) | IDTI_IOSTATUS_INACTIVE);
+            }
+        }
+        /* 남는 슬롯은 0(IOType=None) 그대로 둔다 */
+
+        existed |= (1u << m);
+    }
+
+    /* IsExistModule: 빅엔디안 16bit, 모듈 N = bit N */
+    out[8] = (uint8_t)((existed >> 8) & 0xFF);
+    out[9] = (uint8_t)(existed & 0xFF);
+}
+
 static void build_device_status(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], int door_status, time_t now,
-                                int category, int type)
+                                int category, int type, const AcuModuleLayout *layout)
 {
     (void)door_status; /* V2 Device Status 구조체 자체에는 도어 상태 필드가 없음(Event Info 쪽에만 존재) */
 
@@ -321,7 +379,7 @@ static void build_device_status(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], int door
     out[6] = idti_to_bcd(tmv.tm_min);
     out[7] = idti_to_bcd(tmv.tm_sec);
 
-    /* out[8..9] ExistedModule = 0 (확장 IO 모듈 없음), out[10..233] IOModuleStatus = 0 (memset로 처리됨) */
+    fill_modules(out, layout);
 }
 
 /*
@@ -399,7 +457,7 @@ static int send_response(AcuNet *net, const IdtiHeader *hdr,
     if (!exclude_status)
     {
         build_device_status(payload, net->door_status, time(NULL),
-                            net->device_category, net->device_type);
+                            net->device_category, net->device_type, &net->layout);
         payload_len = IDTI_DEVICE_STATUS_V2_LEN;
     }
     if (data_len > 0 && data != NULL)
@@ -618,6 +676,15 @@ void net_set_device_identity(AcuNet *net, int category, int type)
     {
         net->device_category = category;
         net->device_type = type;
+    }
+}
+
+/* 상위 시스템에 보고할 I/O 구성을 설정한다 */
+void net_set_module_layout(AcuNet *net, const AcuModuleLayout *layout)
+{
+    if (net && layout)
+    {
+        net->layout = *layout;
     }
 }
 
