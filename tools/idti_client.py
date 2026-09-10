@@ -248,7 +248,9 @@ def main():
     ap = argparse.ArgumentParser(description="ACU IDTi V2 테스트 클라이언트")
     ap.add_argument("--host", default="127.0.0.1", help="ACU 주소 (기본 127.0.0.1)")
     ap.add_argument("--port", type=int, default=9870, help="ACU 포트 (기본 9870)")
-    ap.add_argument("--request", choices=["history", "status"], default="history",
+    ap.add_argument("--request",
+                    choices=["history", "status", "lcd-check", "lcd-change", "lang-check", "lang-change"],
+                    default="history",
                     help="history=이벤트 로그 조회(기본), "
                          "status=장치 상태 요청(RequestStatus/Read/Firmware — PC가 접속 후 보내는 첫 명령)")
     ap.add_argument("--exclude-status", action="store_true",
@@ -260,11 +262,25 @@ def main():
     ap.add_argument("--raw", action="store_true", help="주고받은 바이트를 hex로 함께 출력")
     args = ap.parse_args()
 
+    # LCD 명령 4종의 Command/Sub/Object (근거: isldev/clsDevCommand.cs). 우리 장비에는 LCD가 없다
+    OBJ_LCD_CONTROL, OBJ_MULTI_LANGUAGE = 0x31, 0xA5
+    CMD_SND_STATUS, CMD_SND_DATA, SUBCMD_CHANGE = 0x03, 0x05, 0x05
+    data = b""
     if args.request == "history":
         command, sub, obj = CMD_REQ_DATA, SUBCMD_READ, OBJ_HISTORY
-    else:
+    elif args.request == "status":
         # PC(DM)가 접속 후 장치를 확인할 때 보내는 명령과 동일
         command, sub, obj = CMD_REQ_STATUS, SUBCMD_READ, OBJ_FIRMWARE
+    elif args.request == "lcd-check":
+        command, sub, obj = CMD_REQ_DATA, SUBCMD_READ, OBJ_LCD_CONTROL
+    elif args.request == "lcd-change":
+        command, sub, obj = CMD_SND_DATA, SUBCMD_CHANGE, OBJ_LCD_CONTROL
+        data = bytes(40)  # LCD 설정 블록 크기만큼 채워 보낸다
+    elif args.request == "lang-check":
+        command, sub, obj = CMD_REQ_DATA, SUBCMD_READ, OBJ_MULTI_LANGUAGE
+    else:  # lang-change
+        command, sub, obj = CMD_SND_STATUS, SUBCMD_CHANGE, OBJ_MULTI_LANGUAGE
+        data = bytes([7])  # Korean
 
     frame_option = FOPT_REQUEST_ACK | FOPT_TCP
     if args.exclude_status:
@@ -282,7 +298,7 @@ def main():
     try:
         while args.watch or sent < args.count:
             req = build_request(command, sub, obj, frame_index=frame_index,
-                                frame_option=frame_option)
+                                data=data, frame_option=frame_option)
             if args.raw:
                 print(f"송신 {len(req)}byte: {req.hex()}")
             sock.sendall(req)

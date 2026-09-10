@@ -329,11 +329,11 @@ acud 자신 ─────┘                                          (유일�
       공통 입력이 서버에 4번 잡히므로 **정해져 있어야 운영자가 화면을 해석할 수 있다**. 사용자 결정 필요
 - [ ] **2. `IsExistModule` 바이트 순서 서버 실측** — ACU 쪽은 `00 0F`로 보내는 것 확인.
       DM에서 장치구조를 다시 받아 `devmoduleenabled = 11110000000000`인지 확인하면 끝
-- [ ] **3. LCD 명령 4종의 "미지원" 응답** — 무응답이면 관리 화면이 오류로 뜬다
-  - LCDControl 확인 `RequestData(6)/Read(2)/49`, 변경 `SendData(5)/Change(5)/49`
-  - MultiLanguage 확인 `RequestData(6)/Read(2)/165`, 변경 `SendStatus(3)/Change(5)/165`
-  - 결과 코드 후보: `clsDevParams.AckResult` (Success=1, Fail=2, Fail_NoneExisting=7 …).
-        ACK 프레임에서 결과 바이트 위치 확인 필요
+- [x] ~~**3. LCD 명령 4종의 "미지원" 응답**~~ -> **구현·보드 검증 완료**. 상세는 README "LCD 명령 4종 응답"
+  - **DM 쪽에 알릴 답**: 미지원 = **`AckResult Fail(2)` 1byte** (LCDControl 확인·변경, MultiLanguage 변경).
+    단 **MultiLanguage 확인은 DM 코드에 실패 분기가 없어** 언어값 `English(1)`로 답한다.
+    DM이 "LCD 없음" 문구를 띄우고 싶다면 이 명령만 서버 쪽 분기가 필요하다
+  - [ ] DM 실제 화면에서 LCD 설정 창을 열어 오류 없이 "실패"로 뜨는지 확인
 - [ ] 4. 모델 번호 신규 발급 시점 — 그때까지 `DeviceType = 33`
 - [ ] `module_type`(mType) 올바른 값 확인 — 현장 SSC-324가 보내는 값을 DM DB에서 읽어 오면 확정된다
 

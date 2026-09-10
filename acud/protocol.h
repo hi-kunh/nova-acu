@@ -55,6 +55,21 @@
 #define IDTI_OBJ_HISTORY_COUNT 0x05 /* 이벤트 개수 (아직 미구현) */
 #define IDTI_OBJ_HISTORY_INDEX 0x06 /* 이벤트 읽기 위치 (아직 미구현) */
 #define IDTI_OBJ_FIRMWARE      0x2A /* 42. PC가 접속 후 장치 상태를 물을 때 쓰는 오브젝트 */
+#define IDTI_OBJ_LCD_CONTROL   0x31 /* 49. LCD 백라이트/날짜 형식. 우리 장비에는 LCD가 없다 */
+#define IDTI_OBJ_MULTI_LANGUAGE 0xA5 /* 165. LCD 표시 언어. 우리 장비에는 LCD가 없다 */
+
+/*
+ * 설정 명령에 대한 ACK 결과 (clsDevParams.AckResult). 응답 Data에 1byte로 싣는다.
+ * (근거: IntelliScan Interphone SDK의 장치 측 ACK 조립 코드)
+ *
+ * "미지원"은 Fail(2)로 알린다. DM은 설정 결과를 Success/Fail/MaxLimit/SystemBusy만 분기하므로
+ * 그 밖의 값(예: Fail_NoneExisting=7)을 보내면 결과가 정해지지 않는다.
+ */
+#define IDTI_ACK_SUCCESS 0x01
+#define IDTI_ACK_FAIL    0x02
+
+/* clsDevParams.MultiLanguage. LCD가 없어도 언어 조회에는 값으로 답해야 한다(아래 net.c 참고) */
+#define IDTI_LANGUAGE_ENGLISH 1
 
 /* Event Code (4byte, big-endian) - "2. Event Structure & Event Code.doc" 참고 */
 #define IDTI_EVENT_ACCESS_AUTH_BY_CARD       0x01010102u

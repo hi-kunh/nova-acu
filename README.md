@@ -1214,6 +1214,30 @@ IsExistModule = 00 0F        (모듈 1~4, 뒤 바이트 bit0~3)
 **검증** — 보드 응답 원시 바이트 `[8..9] = 00 0F`, 모듈 1~4 모두 `iocategory=22333333444433`.
 `tools/idti_client.py`가 DM 문서와 같은 문자열 형식으로 보여 주도록 고쳤다.
 
+### LCD 명령 4종 응답 — LCD가 없어도 답해야 한다 (2026-09-10)
+
+DM 규약 문서 5절: *"LCD가 없어도 이 명령들에 정의된 응답은 줘야 한다. 무응답이면 관리 화면이 오류로 뜬다."*
+지금까지는 모르는 요청을 로그만 남기고 무시했다.
+
+**DM 파서를 읽어 보니 명령마다 읽는 방식이 달라서 응답도 명령마다 달라야 했다** (`isldev/clsDevDeviceSetting.cs`)
+
+| 요청 | Command/Sub/Object | DM 파서 | 우리 응답 | DM 결과 |
+|------|-------------------|---------|-----------|---------|
+| LCDControl 확인 | `06/02/49` | 40byte 미만이면 `null` | `Fail(2)` 1byte | Fail_System |
+| LCDControl 변경 | `05/05/49` | 첫 byte를 AckResult로 분기 | `Fail(2)` | Fail_System |
+| MultiLanguage 변경 | `03/05/165` | 첫 byte를 AckResult로 분기 | `Fail(2)` | Fail_System |
+| MultiLanguage 확인 | `06/02/165` | **실패 분기가 없다** — 첫 byte를 언어값으로 읽음 | `English(1)` | Success |
+
+- **MultiLanguage 확인에 `Fail(2)`를 보내면 DM은 "Polish(2)"로 성공 처리한다.** 그래서 이것만은 실제 언어값으로 답한다
+- "미지원" 코드는 **`Fail(2)`**. DM은 설정 결과를 Success/Fail/MaxLimit/SystemBusy만 분기하므로
+  `Fail_NoneExisting(7)` 같은 값은 결과가 정해지지 않는다
+- 세 파서 모두 길이 검사 후 `null`/기본값을 돌려주고 예외는 던지지 않는다 — 짧은 응답으로 DM이 죽을 일은 없다
+- ACK 형식은 **IntelliScan Interphone SDK의 장치 측 코드**에서 가져왔다: Data = AckResult 1byte,
+  Command/Sub/Object는 요청 그대로 되돌린다
+
+**검증** (`tools/idti_client.py --request lcd-check|lcd-change|lang-check|lang-change`) — 응답 47byte
+(헤더 44 + 데이터 1 + 꼬리 2), 데이터 byte가 위 표와 일치: `02` / `02` / `01` / `02`.
+
 ## 빌드 & 실행
 
 ```bash
