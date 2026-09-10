@@ -24,7 +24,7 @@ typedef struct {
     int readers;         /* 모듈당 카드리더 */
     int inputs;          /* 모듈당 입력 */
     int outputs;         /* 모듈당 출력 */
-    int common_inputs;   /* 모듈당 알람·화재 입력. 이름과 달리 모듈마다 실제로 배선된 입력이다 */
+    int alarm_fire_inputs; /* 모듈당 알람·화재 입력 (모듈마다 실제로 배선된다) */
     int module_type;     /* clsDevParams.ModuleType */
     int install_type;    /* IDTI_MODULE_INSTALL_* */
 } AcuModuleLayout;

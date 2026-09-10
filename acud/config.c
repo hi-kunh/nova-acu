@@ -58,7 +58,7 @@ void config_set_defaults(AcuConfig *cfg)
     cfg->module_readers = IDTI_MODULE_DEFAULT_READERS;
     cfg->module_inputs = IDTI_MODULE_DEFAULT_INPUTS;
     cfg->module_outputs = IDTI_MODULE_DEFAULT_OUTPUTS;
-    cfg->module_common_inputs = IDTI_MODULE_DEFAULT_COMMON_INPUTS;
+    cfg->module_alarm_fire_inputs = IDTI_MODULE_DEFAULT_ALARM_FIRE_INPUTS;
     cfg->module_type = ACU_DEFAULT_MODULE_TYPE;
     cfg->module_install_type = ACU_DEFAULT_MODULE_INSTALL_TYPE;
 }
@@ -265,9 +265,9 @@ int config_load(const char *path, AcuConfig *cfg)
         read_int_field(root, "module_inputs", 0, IDTI_MODULE_IO_SLOTS, IDTI_MODULE_DEFAULT_INPUTS);
     cfg->module_outputs =
         read_int_field(root, "module_outputs", 0, IDTI_MODULE_IO_SLOTS, IDTI_MODULE_DEFAULT_OUTPUTS);
-    cfg->module_common_inputs =
-        read_int_field(root, "module_common_inputs", 0, IDTI_MODULE_IO_SLOTS,
-                       IDTI_MODULE_DEFAULT_COMMON_INPUTS);
+    cfg->module_alarm_fire_inputs =
+        read_int_field(root, "module_alarm_fire_inputs", 0, IDTI_MODULE_IO_SLOTS,
+                       IDTI_MODULE_DEFAULT_ALARM_FIRE_INPUTS);
     cfg->module_type = read_int_field(root, "module_type", 0, 255, ACU_DEFAULT_MODULE_TYPE);
     cfg->module_install_type =
         read_int_field(root, "module_install_type", 0, 2, ACU_DEFAULT_MODULE_INSTALL_TYPE);

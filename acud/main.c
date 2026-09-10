@@ -58,7 +58,7 @@ static void apply_module_layout(AcuNet *net, const AcuConfig *cfg)
     layout.readers = cfg->module_readers;
     layout.inputs = cfg->module_inputs;
     layout.outputs = cfg->module_outputs;
-    layout.common_inputs = cfg->module_common_inputs;
+    layout.alarm_fire_inputs = cfg->module_alarm_fire_inputs;
     layout.module_type = cfg->module_type;
     layout.install_type = cfg->module_install_type;
     net_set_module_layout(net, &layout);

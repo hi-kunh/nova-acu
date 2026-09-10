@@ -325,7 +325,7 @@ static void fill_modules(uint8_t out[IDTI_DEVICE_STATUS_V2_LEN], const AcuModule
         { layout->readers,       IDTI_IOTYPE_PROXIMITY_READER },
         { layout->inputs,        IDTI_IOTYPE_INPUT_SENSOR     },
         { layout->outputs,       IDTI_IOTYPE_OUTPUT_RELAY     },
-        { layout->common_inputs, IDTI_IOTYPE_INPUT_SENSOR     }, /* 알람·화재 (모듈마다 배선) */
+        { layout->alarm_fire_inputs, IDTI_IOTYPE_INPUT_SENSOR },
     };
 
     int module_count = layout->module_count;

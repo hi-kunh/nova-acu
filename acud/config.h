@@ -31,7 +31,7 @@ typedef struct {
     int  module_readers;
     int  module_inputs;
     int  module_outputs;
-    int  module_common_inputs; /* 모듈당 알람·화재 입력. 이름과 달리 모듈마다 실제로 배선된 입력이다 */
+    int  module_alarm_fire_inputs; /* 모듈당 알람·화재 입력 (모듈마다 실제로 배선된다) */
     int  module_type;          /* clsDevParams.ModuleType. 아직 확정 전이라 설정으로 뺐다 */
     int  module_install_type;  /* 1=Internal, 2=External */
 

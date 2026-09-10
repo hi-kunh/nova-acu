@@ -1207,7 +1207,7 @@ IsExistModule = 00 0F        (모듈 1~4, 뒤 바이트 bit0~3)
 
 **설정** (`config.json`, 전부 선택 필드)
 `module_count`(4) · `module_readers`(2) · `module_inputs`(6) · `module_outputs`(4) ·
-`module_common_inputs`(2) · `module_type`(123) · `module_install_type`(2=External)
+`module_alarm_fire_inputs`(2) · `module_type`(123) · `module_install_type`(2=External)
 
 - `module_type`의 올바른 값은 **아직 모른다.** DM 문서에도 SSC-324의 mType은 없다.
   서버가 DeviceType(33)만 비교하고 mType으로 거르지는 않는 것으로 보여 우선 123으로 둔다

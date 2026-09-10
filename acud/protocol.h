@@ -200,7 +200,7 @@
 #define IDTI_MODULE_DEFAULT_READERS        2
 #define IDTI_MODULE_DEFAULT_INPUTS         6
 #define IDTI_MODULE_DEFAULT_OUTPUTS        4
-#define IDTI_MODULE_DEFAULT_COMMON_INPUTS  2
+#define IDTI_MODULE_DEFAULT_ALARM_FIRE_INPUTS 2
 #define IDTI_DEVICE_STATUS_V2_LEN 234 /* Protocol V2 Device Status 크기 (10 + 16*14) */
 
 /* 파싱된 요청 헤더 (44byte 중 우리가 실제로 쓰는 필드만 native 타입으로 보관) */
