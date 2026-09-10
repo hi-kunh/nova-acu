@@ -335,10 +335,13 @@ acud 자신 ─────┘                                          (유일�
         코드 후보 `0x20030102` Hardware_No Response. `20010102` Comm Halted는 DM이 ACU TCP 단절에 쓰므로 금지
   - [x] ~~**화재 시 전체 개방 전달 경로**~~ -> **DM이 처리. ACU는 DM에만 이벤트를 올린다** (2026-09-10 결정).
         DM에 이미 "이벤트 코드 -> 강제 개방 정책 -> 대상 컨트롤러마다 명령" 기능이 있다
-  - [ ] **화재·알람 입력 이벤트를 DM에 올리기** — 화재 `0x18010401`/`0x18010402`, 알람 코드는 DM과 확정
+  - [ ] **화재·알람 입력 이벤트를 DM에 올리기** — 화재 `0x18010401`/`0x18010402`,
+        **알람 `0x18010306`/`0x18010307`** (Intrusion Motion Detected/Restored, 2026-09-10 확정)
   - [ ] **DM의 강제 개방 명령 받기** — `SendStatus(3)/Change(5)/Object 206`, Data `Normal=0/ForcedOpen=1`.
         받으면 모든 도어를 열고 ACK. 확인 명령 `RequestData(6)/Read(2)/206`에는 현재 모드로 답한다
-  - [ ] 이벤트 코드 확정(DM과): 알람 입력 코드(Sensor Detected vs Intrusion Detected), USB 복구 코드
+  - [x] ~~알람 입력 코드~~ -> **`0x18010306` 발생 / `0x18010307` 복구** (2026-09-10). DM 해석 표에 등록돼 있음 확인
+    - [ ] Platinum DB `eventcode_tbl`에서 `18010306 -> StringCode 69(MotionDetected)` 연결 확인
+  - [ ] 이벤트 코드 확정(DM과): USB 복구 코드
         (상세·코드표는 HARDWARE.md "제품 I/O 구성")
 - [ ] **2. `IsExistModule` 바이트 순서 서버 실측** — ACU 쪽은 `00 0F`로 보내는 것 확인.
       DM에서 장치구조를 다시 받아 `devmoduleenabled = 11110000000000`인지 확인하면 끝
