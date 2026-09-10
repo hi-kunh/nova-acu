@@ -388,7 +388,7 @@ RK3568 기반 구성에서는 하위 통신을 UART 대신 **CAN bus**로 가져
 - [ ] **Wiegand 카드 ID 형식** — 26bit(facility 8 + card 16) / 34bit 중 무엇을 쓸지, 그리고 이것을
       현재 DB 스키마의 `card_id`(hex 16자) 형식에 어떻게 담을지
 - [ ] **채널 번호 체계 확정** — 위 표는 제안값. RRU 펌웨어 쪽 번호와 일치시켜야 함
-- [ ] **RRU 미연결/장애 시 ACU 동작** — 로그만 남기고 계속 동작할지, 상위 시스템에 장애 이벤트를 올릴지
+- [x] ~~**RRU 미연결/장애 시 ACU 동작**~~ -> **DM에 이벤트로 알린다** (2026-09-10 결정). 상세는 "제품 I/O 구성" 절
 - [ ] **장치 타입 코드 확정** — RRU가 IDTi Remote Module(RIM/ROM/RRM/RXM) 중 무엇에 대응하는지,
       Device Status의 `ExistedModule`/`IOModuleStatus`로 RRU를 보고해야 하는지
       (현재 코드는 전부 0으로 채우고 있음. 미확인 문서 `8. System Device Reader Setup` 확인 대상)
@@ -435,9 +435,39 @@ IsExistModule  [B0][B1] = 00 0F   (모듈 1~4)
       MCU 핀은 늘지 않는다 — I/O 익스팬더 채널이 8개 늘 뿐이다. 드는 것은 입력 보호회로·단자·기판 면적.
       (처음엔 "보드 공통 2개, ACU IO 보드에 직접"으로 정했으나 공통 입력이라는 전제가 틀려 바꿨다)
 - [ ] 입력 보호·절연 (현장 배선이 길고 화재 수신반과 연결됨)
-- [ ] **화재 해정 방식 재결정** — 처음엔 "ACU가 RRU에 해정 명령"으로 정했다(⚠ USB가 끊기면 해정 불가).
-      화재 입력을 RRU에 붙이기로 하면서 **RRU가 ACU·USB와 무관하게 자기 릴레이를 직접 풀 수 있게 됐다.**
-      인명안전 요구(소방 규정) 확인 후 확정할 것
+- [ ] **화재 해정 = ACU가 RRU에 명령** (확정). **RRU는 릴레이를 스스로 구동하지 않는다** (2026-09-10 사용자 확인).
+      앞서 "화재 입력을 RRU에 붙이면 RRU가 직접 해정할 수 있다"고 적었으나 이 전제로 틀렸다.
+      ⚠ 그래서 **USB가 끊기면 화재 시에도 해정할 수 없다** → USB 단절을 즉시 DM에 이벤트로 알린다(아래)
+- [x] ~~**화재 시 전체 개방의 전달 경로**~~ -> **DM이 처리한다. ACU는 DM에만 이벤트를 올린다** (2026-09-10 결정).
+      "한 ACU가 받은 화재로 모든 문을 연다"는 운영 요구이고, 연동은 DM 몫이다
+  - DM에 **이미 그 기능이 있다** (`DeveiceManager/.../frmMain.cs` 정책 명령부 확인):
+    ```
+    GetPolicyCommandExecuteType(eventCode)
+      -> devicepolicyevent_tbl 에서 수신한 이벤트 코드 조회 -> cmdtype(ForcedOpen / Normal)
+      -> devicepolicycontroller_tbl 의 컨트롤러마다 ControlDoorForcedOpenModeChange 전송
+    ```
+    그러니 ACU가 `0x18010401` Fire Detected를 올리면, DM 정책 표에 등록된 ACU들의 문이 열린다
+  - 명령 형식: `SendStatus(3) / Change(5) / Object 206(DoorForcedOpenControl)`, Data 1byte `Normal=0 / ForcedOpen=1`.
+    확인은 `RequestData(6) / Read(2) / 206`
+  - 참고: DM 경유이므로 **DM PC가 꺼져 있으면 다른 ACU로 전파되지 않는다** (운영상 알고 있어야 할 한계)
+  - [ ] **ACU가 Object 206 강제 개방 명령을 받아 모든 도어를 여는 처리 구현** — 화재를 감지한 ACU도
+        DM 정책 대상이면 이 명령으로 열린다
+- [ ] **USB(ACU↔RRU) 단절 이벤트** — DM에 올린다
+  - 코드 후보 `0x20030102` **Hardware_No Response** (이벤트 구조의 Module Address 필드로 모듈 번호를 실을 수 있다)
+  - **`0x20010102` Comm Halted는 쓰면 안 된다** — DM이 ACU와의 TCP가 끊겼을 때 **스스로 기록하는 코드**라
+    ACU↔RRU 단절과 구분이 안 된다 (DM `frmMain.cs`의 연결 오류 처리에서 확인)
+  - [ ] 복구 코드 — 표에 Hardware 계열 짝이 없다. DM 쪽과 정할 것
+
+**관련 이벤트 코드** (`IDTI WebApp Protocol/2. IDTi Protocol Event Structure & Event Code.doc`)
+
+| 코드 | 이름 | 쓸 곳 |
+|------|------|-------|
+| `0x18010401` / `0x18010402` | Fire Detected / Fire Restored | 화재 입력 |
+| `0x18010111` / `0x18010112` | Sensor Detected / Restored | 알람 입력 후보 ("Alarm Detected"라는 코드는 없다) |
+| `0x18010304` / `0x18010305` | Intrusion Detected / Restored | 알람 입력 후보 |
+| `0x18010119` / `0x1801011A` | Force Open Mode / Release Force Open Mode | 전체 개방 적용·해제 |
+| `0x20030102` | Hardware_No Response | USB 단절 후보 |
+| `0x20010101` / `0x20010102` | Comm Started / Comm Halted | **DM이 ACU TCP 연결에 사용 — USB용으로 쓰지 말 것** |
 
 ---
 

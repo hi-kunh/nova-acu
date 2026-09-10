@@ -41,12 +41,27 @@ if [ -z "$VERSION" ] && git -C "$ROOT" rev-parse --short HEAD >/dev/null 2>&1; t
     git -C "$ROOT" diff --quiet 2>/dev/null || VERSION="$VERSION-dirty"
 fi
 
-echo "== 컨테이너 안에서 릴리스 번들 생성 =="
+#
+# 저장소를 그대로 컨테이너에 붙이면 컨테이너 안의 make가 **개발 PC의 acud/acud를 arm64로 덮어쓴다.**
+# 그러면 개발 PC에서 ./acud가 실행되지 않는다(2026-09-10에 실제로 겪었다).
+# 그래서 빌드에 필요한 파일만 임시 폴더로 복사해 그 폴더를 컨테이너에 붙이고,
+# 만들어진 번들만 저장소의 dist/로 가져온다. 버전은 위에서 개발 PC의 git으로 이미 정했다.
+#
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/acud-build.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+cp -a "$ROOT/acud" "$ROOT/deploy" "$WORK/"
+rm -f "$WORK/acud/acud" "$WORK/acud"/*.o
+
+echo "== 컨테이너 안에서 릴리스 번들 생성 (작업 폴더: $WORK) =="
 podman run --rm --platform "$PLATFORM" \
-    -v "$ROOT:/src" \
+    -v "$WORK:/src" \
     -e "ACU_VERSION=$VERSION" \
     "$IMAGE" \
-    sh -c 'cd /src && make -C acud clean >/dev/null 2>&1; sh deploy/release.sh'
+    sh -c 'cd /src && sh deploy/release.sh'
+
+mkdir -p "$ROOT/dist"
+cp "$WORK"/dist/*.tar.gz "$ROOT/dist/"
 
 echo
 echo "== 결과 =="
