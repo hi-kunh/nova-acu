@@ -7,5 +7,6 @@
     "log_path": "",
     "device_category": 3,
     "device_type": 33,
+    "module_count": 2,
     "inactivity_seconds": 600
 }

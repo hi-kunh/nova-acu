@@ -207,9 +207,10 @@
  *   slot 8..11  출력 4
  *   slot 12..13 알람·화재 2 <- 모듈마다 실제로 배선된 입력이다 (SSC-324 실물: 모듈마다 알람 1 · 화재 1)
  *
- * 모듈 4개 -> 리더 8 / 입력 32 / 출력 16 으로 RRU 구성과 맞아떨어진다.
+ * 기본 모듈 2개 -> 리더 4 / 입력 16 / 출력 8. 개발 우선 대상 RRU-M2 한 대이자
+ * SSC-324 본체와 같은 모양이다 (2026-09-11 변경, 이전 기본값 4).
  */
-#define IDTI_MODULE_DEFAULT_COUNT          4
+#define IDTI_MODULE_DEFAULT_COUNT          2
 #define IDTI_MODULE_DEFAULT_READERS        2
 #define IDTI_MODULE_DEFAULT_INPUTS         6
 #define IDTI_MODULE_DEFAULT_OUTPUTS        4

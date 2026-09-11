@@ -1321,6 +1321,15 @@ SQLite에 100만 건을 넣어 재 보니 시각 인덱스 포함 **1건 39.9byt
 리더 28개 혼잡 현장(리더당 하루 500건)이 1년 511만 건이라 1,000만 건 링이면 약 2년치다.
 지금의 메모리 큐 32건은 정전·재부팅에 사라지므로 `events.db`로 바꾼다 (HARDWARE.md "이벤트 저장" 절).
 
+### 2026-09-11 — 기본 모듈 2개로 변경 (RRU-M2 우선)
+
+개발 우선 대상이 `RRU-M2`(모듈 2)로 정해져, acud가 보고하는 기본 모듈 수를 4에서 **2**로 바꿨다.
+SSC-324 본체와 같은 모양이라 DM 화면에서 현장 SSC-324와 나란히 비교할 수 있다.
+
+- `protocol.h` `IDTI_MODULE_DEFAULT_COUNT` 4 → 2, `deploy/config.json`에 `"module_count": 2` 명시
+- 보드 `/etc/acud/config.json`에도 `"module_count": 2` 추가 (원본은 `config.json.bak-20260911`)
+- 보드 확인: `ExistedModule=0x0003`, 모듈 1~2 `22333333444433`, 합계 **리더 4 · 입력 16 · 출력 8**
+
 ## 빌드 & 실행
 
 ```bash
