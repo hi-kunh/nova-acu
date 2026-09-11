@@ -629,15 +629,17 @@ static void handle_firmware_request(AcuNet *net, const IdtiHeader *hdr)
 }
 
 /*
- * LCD 관련 명령 4종에 답한다. **우리 장비에는 LCD가 없지만 무응답이면 DM 관리 화면이 오류로 뜬다.**
- * DM 파서가 명령마다 다르게 읽으므로 응답도 명령마다 다르다 (isldev/clsDevDeviceSetting.cs 확인):
+ * LCD 관련 명령 4종에 답한다. **우리 장비에는 LCD가 없지만, SSC-324처럼 성공으로 답하고 내용은 버린다.**
  *
- *   LCDControl 확인     40byte 미만이면 null -> Fail_System     : Fail(2) 1byte
- *   LCDControl 변경     첫 byte를 AckResult로 분기              : Fail(2) 1byte
- *   MultiLanguage 변경  첫 byte를 AckResult로 분기              : Fail(2) 1byte
- *   MultiLanguage 확인  **실패 분기가 없다** - 첫 byte를 언어로 읽음 : English(1)
+ * DM 규약 문서 5절 개정(2026-09-11) 권고를 따른다. "미지원(Fail)"으로 답하면 기존 장비와 화면 흐름이
+ * 달라져 운영자가 고장으로 읽고, SSC-324와 섞여 도는 현장에서 같은 버튼이 장비마다 다르게 반응한다.
+ * 목표가 기존 장비 대체이므로 "더 정직한 응답"보다 "기존 장비와 같은 응답"이 맞다.
  *
- * 마지막 경우에 Fail(2)을 보내면 DM은 "Polish(2)"로 성공 처리한다. 그래서 실제 언어값으로 답한다.
+ *   LCDControl 확인     RequestData/Read/49   -> LCD 설정 40byte 기본값 (백라이트 Default, yyyyMMdd)
+ *   LCDControl 변경     SendData/Change/49    -> Success(1), 받은 설정은 버림
+ *   MultiLanguage 확인  RequestData/Read/165  -> 언어 English(1)
+ *   MultiLanguage 변경  SendStatus/Change/165 -> Success(1), 받은 언어는 버림
+ *
  * 응답 Command는 Interphone SDK의 장치 측 ACK처럼 요청의 Command/Sub/Object를 그대로 되돌린다.
  * 처리했으면 1, LCD 명령이 아니면 0을 돌려준다.
  */
@@ -651,19 +653,37 @@ static int handle_lcd_request(AcuNet *net, const IdtiHeader *hdr)
     }
 
     int is_query = (hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ);
-    uint8_t result = IDTI_ACK_FAIL;
-    if (is_language && is_query)
+
+    uint8_t data[IDTI_LCD_INFO_LEN];
+    size_t data_len = 1;
+    const char *what;
+
+    memset(data, 0, sizeof(data));
+    if (is_lcd_control && is_query)
     {
-        result = IDTI_LANGUAGE_ENGLISH;
+        /* 시작·종료 시각 00:00, 사용자 날짜 형식 없음, 예약 0 — memset이 이미 채웠다 */
+        data[0] = IDTI_LCD_BACKLIGHT_DEFAULT;
+        data[5] = IDTI_LCD_DATEFORMAT_YYYYMMDD;
+        data_len = IDTI_LCD_INFO_LEN;
+        what = "LCD 설정 기본값 40byte";
+    }
+    else if (is_language && is_query)
+    {
+        data[0] = IDTI_LANGUAGE_ENGLISH;
+        what = "언어 English(1)";
+    }
+    else
+    {
+        data[0] = IDTI_ACK_SUCCESS; /* 변경 요청: 성공으로 답하고 내용은 버린다 */
+        what = "Success(1), 내용 버림";
     }
 
     send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object,
-                  &result, sizeof(result), 1, 1, 1, sizeof(result));
+                  data, data_len, 1, 1, 1, (uint16_t)data_len);
 
     char line[160];
     snprintf(line, sizeof(line), "네트워크: LCD 명령(cmd=0x%02x sub=0x%02x obj=0x%02x) - LCD 없음, %s 응답",
-             hdr->command, hdr->sub_command, hdr->object,
-             (is_language && is_query) ? "언어 English(1)" : "Fail(2)");
+             hdr->command, hdr->sub_command, hdr->object, what);
     log_msg(line);
     return 1;
 }

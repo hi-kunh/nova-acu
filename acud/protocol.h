@@ -61,12 +61,25 @@
 /*
  * 설정 명령에 대한 ACK 결과 (clsDevParams.AckResult). 응답 Data에 1byte로 싣는다.
  * (근거: IntelliScan Interphone SDK의 장치 측 ACK 조립 코드)
- *
- * "미지원"은 Fail(2)로 알린다. DM은 설정 결과를 Success/Fail/MaxLimit/SystemBusy만 분기하므로
- * 그 밖의 값(예: Fail_NoneExisting=7)을 보내면 결과가 정해지지 않는다.
  */
 #define IDTI_ACK_SUCCESS 0x01
 #define IDTI_ACK_FAIL    0x02
+
+/*
+ * LCD 설정 블록 40byte (isldev/clsDevDeviceSetting.cs의 GetLCDInfo가 읽는 형식)
+ *
+ *   [0]      BackLightType            1  Default=1 / AlwaysOn=2 / Custom=3
+ *   [1..2]   BackLight 시작 시각       2  바이트마다 16진 두 자리로 읽는다 -> BCD "HHMM"
+ *   [3..4]   BackLight 종료 시각       2  (위와 같음)
+ *   [5]      DateFormatType           1  yyyyMMdd=1 / MMddyyyy=2 / ddMMyyyy=3 / Custom
+ *   [6..37]  DateFormatCustom         32 ASCII, 0으로 채움 (English/Korean일 때)
+ *   [38..39] Reserved                 2
+ *
+ * 40byte보다 짧으면 DM이 null로 처리해 설정 조회가 실패로 뜬다.
+ */
+#define IDTI_LCD_INFO_LEN            40
+#define IDTI_LCD_BACKLIGHT_DEFAULT   1
+#define IDTI_LCD_DATEFORMAT_YYYYMMDD 1
 
 /* clsDevParams.MultiLanguage. LCD가 없어도 언어 조회에는 값으로 답해야 한다(아래 net.c 참고) */
 #define IDTI_LANGUAGE_ENGLISH 1
