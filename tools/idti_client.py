@@ -270,6 +270,38 @@ def recv_packet(sock, timeout):
 #   0 flag[4] / 4 serial[4] / 8 user[32] / 40 card[12] / 52 name[16]
 #   68 restrict[8] / 76 grpcode[16] / 92 apb[1] / 93 reserved[33] / 126 crc_calc / 127 datacrc
 
+# ---- 사용자 1명씩 명령 (1. Basic structure) ----
+#   전송  Cmd 5 / Sub 3 / Obj 0x21   Data(112)
+#   삭제  Cmd 5 / Sub 4 / Obj 0x15   Data(12) = User ID(8) + Revision(4)
+#   받기  Cmd 6 / Sub 2 / Obj 0x21   Data(12)
+SUBCMD_DELETE = 0x04
+OBJ_USER_ALL, OBJ_USER_INFO, OBJ_USER_DATA = 0x15, 0x16, 0x21
+USERDATA_LEN = 112
+
+
+def make_user_data(user_id, card_id, enabled=True, level=1, validation=0, timezone=0,
+                   name=b"NCU TEST"):
+    """UserData(0x21) 112byte = Info(32) + Name(16) + Card(32) + Restriction(16) + Group(16)"""
+    out = bytearray(USERDATA_LEN)
+    info = bytearray(32)
+    info[0:8] = user_id
+    info[12] = 0x80 if enabled else 0x00      # Access Option: Enabled = Option1[0] MSB
+    info[16] = level
+    info[17:19] = validation.to_bytes(2, "big")
+    info[19:21] = timezone.to_bytes(2, "big")
+    info[21:24] = b"\xff\xff\xff"
+    out[0:32] = info
+    out[32:48] = name.ljust(16, b"\x00")[:16]
+    # Card ID 32byte — 앞 8byte는 **뒤집어서** 싣는다 (1. 문서 "Reversed Bytes")
+    out[48:56] = bytes(reversed(card_id))
+    return bytes(out)
+
+
+def user_key(user_id, revision=1):
+    """Data(12) = User ID(8) + Revision ID(4)"""
+    return user_id + revision.to_bytes(4, "big")
+
+
 USERBIN_REC_LEN = 128
 OBJ_USERBIN_START, OBJ_USERBIN_CONTINUE = 0xD0, 0xD1
 ACK_NAMES = {0x01: "Success", 0x02: "Fail"}
@@ -292,8 +324,10 @@ def make_user_record(serial, user_id, card_id, enabled=True,
     info[21:24] = b"\xff\xff\xff"          # Access Expired: 없음
     rec[8:40] = info
 
-    # 카드 12byte — 앞 8byte는 **뒤집어서** 싣는다 (clsDevUserBin.cs의 Array.Reverse)
-    rec[40:48] = bytes(reversed(card_id))
+    # 카드 12byte — **바이너리 경로는 큰 자리부터 그대로** 싣는다.
+    # 뒤집힌 쪽은 단일 사용자 경로의 Proximity Data다 (1. 문서 "Reversed Bytes",
+    # clsDevUserBin.cs가 둘을 Array.Reverse로 오간다)
+    rec[40:48] = card_id
 
     rec[52:68] = b" " * 16                    # LCD 이름
     rec[126] = 0x01                           # crc_calc 고정값

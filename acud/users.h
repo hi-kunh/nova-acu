@@ -97,6 +97,13 @@ int users_lookup_by_card(AcuUsers *u, const uint8_t card_id[ACU_USER_CARD_LEN],
 int users_lookup_by_id(AcuUsers *u, const uint8_t user_id[ACU_USER_ID_LEN],
                        AcuUserRecord *out);
 
+/*
+ * 사용자 ID로 그 사람의 카드를 찾는다 (되돌려 줄 때 쓴다 - 한 명에 카드 하나를 전제한다).
+ * 반환: 1=찾음, 0=없음, -1=오류
+ */
+int users_lookup_card_by_user(AcuUsers *u, const uint8_t user_id[ACU_USER_ID_LEN],
+                              AcuUserCard *out);
+
 /* 등록된 사용자 수. 오류면 -1 */
 long long users_count(const AcuUsers *u);
 

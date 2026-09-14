@@ -30,6 +30,7 @@ struct AcuUsers {
     sqlite3_stmt *st_put;
     sqlite3_stmt *st_put_card;
     sqlite3_stmt *st_delete;
+    sqlite3_stmt *st_card_by_user;
 
     /* 전체 다운로드용 */
     sqlite3_stmt *st_load_put;
@@ -180,7 +181,9 @@ AcuUsers *users_open(const char *path)
             "INSERT OR REPLACE INTO users(" USERS_COLUMNS ") VALUES(" USERS_PLACEHOLDERS ")") ||
         !prepare_one(u, &u->st_put_card,
             "INSERT OR REPLACE INTO user_cards(card_id, user_id, prox_raw) VALUES(?,?,?)") ||
-        !prepare_one(u, &u->st_delete, "DELETE FROM users WHERE user_id = ?"))
+        !prepare_one(u, &u->st_delete, "DELETE FROM users WHERE user_id = ?") ||
+        !prepare_one(u, &u->st_card_by_user,
+            "SELECT card_id, user_id, prox_raw FROM user_cards WHERE user_id = ? LIMIT 1"))
     {
         users_close(u);
         return NULL;
@@ -204,6 +207,7 @@ void users_close(AcuUsers *u)
     sqlite3_finalize(u->st_put);
     sqlite3_finalize(u->st_put_card);
     sqlite3_finalize(u->st_delete);
+    sqlite3_finalize(u->st_card_by_user);
     sqlite3_finalize(u->st_load_put);
     sqlite3_finalize(u->st_load_put_card);
     if (u->db)
@@ -324,6 +328,31 @@ int users_lookup_by_id(AcuUsers *u, const uint8_t user_id[ACU_USER_ID_LEN],
                        AcuUserRecord *out)
 {
     return lookup_with(u, u ? u->st_by_id : NULL, user_id, ACU_USER_ID_LEN, out);
+}
+
+int users_lookup_card_by_user(AcuUsers *u, const uint8_t user_id[ACU_USER_ID_LEN],
+                              AcuUserCard *out)
+{
+    if (!u || !u->st_card_by_user || !user_id || !out)
+    {
+        return -1;
+    }
+    sqlite3_reset(u->st_card_by_user);
+    sqlite3_clear_bindings(u->st_card_by_user);
+    sqlite3_bind_blob(u->st_card_by_user, 1, user_id, ACU_USER_ID_LEN, SQLITE_TRANSIENT);
+
+    int rc = sqlite3_step(u->st_card_by_user);
+    if (rc == SQLITE_ROW)
+    {
+        memset(out, 0, sizeof(*out));
+        column_blob_fixed(u->st_card_by_user, 0, out->card_id, ACU_USER_CARD_LEN);
+        column_blob_fixed(u->st_card_by_user, 1, out->user_id, ACU_USER_ID_LEN);
+        column_blob_fixed(u->st_card_by_user, 2, out->prox_raw, ACU_USER_PROX_LEN);
+        sqlite3_reset(u->st_card_by_user);
+        return 1;
+    }
+    sqlite3_reset(u->st_card_by_user);
+    return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
 long long users_count(const AcuUsers *u)
@@ -579,6 +608,7 @@ int users_load_commit(AcuUsers *u)
     sqlite3_finalize(u->st_put);      u->st_put = NULL;
     sqlite3_finalize(u->st_put_card); u->st_put_card = NULL;
     sqlite3_finalize(u->st_delete);   u->st_delete = NULL;
+    sqlite3_finalize(u->st_card_by_user); u->st_card_by_user = NULL;
     sqlite3_finalize(u->st_load_put);      u->st_load_put = NULL;
     sqlite3_finalize(u->st_load_put_card); u->st_load_put_card = NULL;
 
@@ -611,7 +641,9 @@ int users_load_commit(AcuUsers *u)
             "INSERT OR REPLACE INTO users(" USERS_COLUMNS ") VALUES(" USERS_PLACEHOLDERS ")") ||
         !prepare_one(u, &u->st_put_card,
             "INSERT OR REPLACE INTO user_cards(card_id, user_id, prox_raw) VALUES(?,?,?)") ||
-        !prepare_one(u, &u->st_delete, "DELETE FROM users WHERE user_id = ?"))
+        !prepare_one(u, &u->st_delete, "DELETE FROM users WHERE user_id = ?") ||
+        !prepare_one(u, &u->st_card_by_user,
+            "SELECT card_id, user_id, prox_raw FROM user_cards WHERE user_id = ? LIMIT 1"))
     {
         log_msg("사용자 저장: 교체 뒤 SQL을 다시 준비하지 못했다 - 재시작이 필요하다");
         return -1;

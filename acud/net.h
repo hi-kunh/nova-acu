@@ -67,6 +67,12 @@ void net_set_event_store(AcuNet *net, AcuEvents *store, int batch_size);
 void net_set_userbin(AcuNet *net, AcuUserBin *ub);
 
 /*
+ * 1명씩 주고받는 사용자 명령(usercmd.h)이 쓸 명단을 붙인다.
+ * NULL이면 그 명령에 Fail로 답한다.
+ */
+void net_set_users(AcuNet *net, AcuUsers *users);
+
+/*
  * 유휴 타임아웃을 검사해 필요하면 연결을 닫는다.
  * 소켓이 조용한 것 자체가 판단 근거라 소켓 이벤트로는 알 수 없다 - main의 점검 타이머가 부른다.
  */

@@ -6,6 +6,7 @@
 #include "loop.h"
 #include "events.h"
 #include "userbin.h"
+#include "usercmd.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -77,6 +78,9 @@ struct AcuNet {
 
     /* 사용자 바이너리 전송 수신 (userbin.h). NULL이면 그 명령을 받지 않는다 */
     AcuUserBin *userbin;
+
+    /* 1명씩 주고받는 사용자 명령(usercmd.h)이 쓰는 명단. NULL이면 그 명령을 받지 않는다 */
+    AcuUsers *users;
 
     /*
      * 붙어 있는 이벤트 루프. 리슨 fd와 클라이언트 fd를 여기에 등록한다.
@@ -375,6 +379,14 @@ void net_set_userbin(AcuNet *net, AcuUserBin *ub)
     if (net)
     {
         net->userbin = ub;
+    }
+}
+
+void net_set_users(AcuNet *net, AcuUsers *users)
+{
+    if (net)
+    {
+        net->users = users;
     }
 }
 
@@ -909,6 +921,85 @@ static int handle_userbin_request(AcuNet *net, const IdtiHeader *hdr, const uint
     return 1;
 }
 
+/*
+ * 사용자 1명씩 명령 (`1.` 문서). 처리했으면 1, 우리 명령이 아니면 0.
+ *
+ *   전송  Cmd 5 / Sub 3   Data(N)  -> Result(1)
+ *   삭제  Cmd 5 / Sub 4   Data(12) -> Result(1)
+ *   받기  Cmd 6 / Sub 2   Data(12) -> 그 오브젝트의 데이터
+ */
+static int handle_usercmd_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
+{
+    if (!usercmd_is_user_object(hdr->object))
+    {
+        return 0;
+    }
+
+    const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;
+    size_t data_len = hdr->data_len;
+
+    if (!net->users)
+    {
+        log_msg("네트워크: 사용자 명단이 없어 사용자 명령에 Fail로 답한다");
+        uint8_t ack = IDTI_ACK_FAIL;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        return 1;
+    }
+
+    /* 받기 — 찾으면 그 오브젝트의 데이터를, 못 찾으면 Fail 한 byte를 돌려준다 */
+    if (hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ)
+    {
+        uint8_t body[IDTI_USERDATA_LEN];
+        size_t body_len = 0;
+
+        if (usercmd_get(net->users, hdr->object, data, data_len, body, &body_len) == USERCMD_OK)
+        {
+            send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, hdr->object,
+                          body, body_len, 1, 1, 1, (uint16_t)body_len);
+            char line[120];
+            snprintf(line, sizeof(line), "네트워크: 사용자 받기 (오브젝트 0x%02x) -> %zubyte",
+                     hdr->object, body_len);
+            log_msg(line);
+        }
+        else
+        {
+            uint8_t ack = IDTI_ACK_FAIL;
+            send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object,
+                          &ack, 1, 1, 1, 1, 1);
+            log_msg("네트워크: 사용자 받기 -> Fail (없는 사용자)");
+        }
+        return 1;
+    }
+
+    /* 전송·삭제 — Result 한 byte로 답한다 */
+    AcuUserCmdStatus st;
+    const char *what;
+
+    if (hdr->command == IDTI_CMD_SND_DATA && hdr->sub_command == IDTI_SUBCMD_WRITE)
+    {
+        st = usercmd_set(net->users, hdr->object, data, data_len);
+        what = "전송";
+    }
+    else if (hdr->command == IDTI_CMD_SND_DATA && hdr->sub_command == IDTI_SUBCMD_DELETE)
+    {
+        st = usercmd_delete(net->users, data, data_len);
+        what = "삭제";
+    }
+    else
+    {
+        return 0; /* 사용자 오브젝트지만 우리가 아는 명령이 아니다 */
+    }
+
+    uint8_t ack = (st == USERCMD_OK) ? IDTI_ACK_SUCCESS : IDTI_ACK_FAIL;
+    send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+
+    char line[140];
+    snprintf(line, sizeof(line), "네트워크: 사용자 %s (오브젝트 0x%02x) -> %s",
+             what, hdr->object, (ack == IDTI_ACK_SUCCESS) ? "Success" : "Fail");
+    log_msg(line);
+    return 1;
+}
+
 static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
     /*
@@ -935,6 +1026,11 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pk
     }
 
     if (handle_userbin_request(net, hdr, pkt))
+    {
+        return;
+    }
+
+    if (handle_usercmd_request(net, hdr, pkt))
     {
         return;
     }

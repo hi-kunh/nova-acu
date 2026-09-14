@@ -105,6 +105,38 @@
  *   Continue Cmd 0x05 / Sub 0x03 / Obj 0xD1, Data(2+N) = Index(2) + 원시 데이터 N
  * 응답은 Data(1) = Success(1) / Fail(2). Fail을 받으면 PC가 **직전 패킷을 다시 보낸다.**
  */
+/*
+ * 사용자 오브젝트 (`1.` 문서 Object Table, `3.` 문서 2절 Transmit Structure).
+ * 어느 것으로 올지는 DM이 무엇을 담아 보내느냐에 달렸다 — 데이터 길이로 구분한다.
+ */
+#define IDTI_OBJ_USER_ALL        0x15 /* Info + Name + Card + Finger */
+#define IDTI_OBJ_USER_INFO       0x16 /* Info + Name */
+#define IDTI_OBJ_USER_CARD       0x17 /* Info + Card + Name */
+#define IDTI_OBJ_USER_FINGER     0x18 /* Info + Finger */
+#define IDTI_OBJ_USER_RESTRICT   0x20 /* Info + Restriction */
+#define IDTI_OBJ_USER_DATA       0x21 /* Info + Name + Card + Restriction + Group = 112byte */
+#define IDTI_OBJ_USER_DATA_FGR   0x22 /* 위 + Finger */
+#define IDTI_OBJ_USER_IMAGE      0x23 /* Info + Image */
+
+/*
+ * 1명씩 주고받는 명령 (`1.` 문서).
+ *   전송  Cmd 0x05 / Sub 0x03 / Obj 사용자 오브젝트 + Data(N)
+ *   삭제  Cmd 0x05 / Sub 0x04 / Obj 사용자 오브젝트 + Data(12) = User ID(8) + Revision(4)
+ *   받기  Cmd 0x06 / Sub 0x02 / Obj 사용자 오브젝트 + Data(12)
+ * 응답은 전송·삭제가 Data(1) = Result, 받기는 해당 오브젝트의 데이터.
+ */
+#define IDTI_USERCMD_KEY_LEN 12 /* User ID(8) + Revision ID(4) */
+
+/* UserData(0x21) 한 명의 길이와 배치 (`1.` 문서 예시, `3.` 문서 2절) */
+#define IDTI_USERDATA_LEN          112
+#define IDTI_USERDATA_OFF_INFO       0
+#define IDTI_USERDATA_OFF_NAME      32
+#define IDTI_USERDATA_OFF_CARD      48
+#define IDTI_USERDATA_LEN_CARD      32
+#define IDTI_USERDATA_OFF_RESTRICT  80
+#define IDTI_USERDATA_LEN_RESTRICT  16
+#define IDTI_USERDATA_OFF_GROUP     96
+
 #define IDTI_OBJ_USERBIN_START    0xD0
 #define IDTI_OBJ_USERBIN_CONTINUE 0xD1
 

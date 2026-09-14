@@ -428,6 +428,7 @@ int main(int argc, char **argv)
     net_set_time_sync(net, cfg.time_sync_enabled);
     net_set_event_store(net, events, cfg.events_batch_size);
     net_set_userbin(net, userbin);
+    net_set_users(net, users);
     apply_module_layout(net, &cfg);
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
@@ -546,6 +547,7 @@ int main(int argc, char **argv)
                         net_set_time_sync(net, new_cfg.time_sync_enabled);
                         net_set_event_store(net, events, new_cfg.events_batch_size);
                         net_set_userbin(net, userbin);
+                        net_set_users(net, users);
                         apply_module_layout(net, &new_cfg);
                         net_attach_loop(net, loop);
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");

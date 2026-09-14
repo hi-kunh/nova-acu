@@ -171,7 +171,7 @@ static int record_crc_ok(const uint8_t *rec)
 }
 
 /* User Info 32byte를 레코드 구조체로 옮긴다 (`3.` 문서 A절) */
-static void parse_user_info(const uint8_t *info, AcuUserRecord *r)
+void userbin_parse_user_info(const uint8_t *info, AcuUserRecord *r)
 {
     memcpy(r->user_id, info + IDTI_USERINFO_OFF_ID, ACU_USER_ID_LEN);
     r->general_group   = info[IDTI_USERINFO_OFF_GENGROUP];
@@ -192,8 +192,38 @@ static void parse_user_info(const uint8_t *info, AcuUserRecord *r)
     r->canteen_code    = info[IDTI_USERINFO_OFF_CANTEEN];
 }
 
+/* 레코드 구조체를 User Info 32byte로 되돌린다 (되돌려 줄 때 쓴다) */
+void userbin_build_user_info(const AcuUserRecord *r, uint8_t *info)
+{
+    memset(info, 0, IDTI_USERINFO_LEN);
+    memcpy(info + IDTI_USERINFO_OFF_ID, r->user_id, ACU_USER_ID_LEN);
+    info[IDTI_USERINFO_OFF_GENGROUP] = r->general_group;
+    info[IDTI_USERINFO_OFF_REVISION]     = (uint8_t)(r->revision_id >> 8);
+    info[IDTI_USERINFO_OFF_REVISION + 1] = (uint8_t)r->revision_id;
+    info[IDTI_USERINFO_OFF_OPTION]     = (uint8_t)(r->access_option >> 24);
+    info[IDTI_USERINFO_OFF_OPTION + 1] = (uint8_t)(r->access_option >> 16);
+    info[IDTI_USERINFO_OFF_OPTION + 2] = (uint8_t)(r->access_option >> 8);
+    info[IDTI_USERINFO_OFF_OPTION + 3] = (uint8_t)r->access_option;
+    info[IDTI_USERINFO_OFF_LEVEL] = r->level;
+    info[IDTI_USERINFO_OFF_VALIDATION]     = (uint8_t)(r->validation_code >> 8);
+    info[IDTI_USERINFO_OFF_VALIDATION + 1] = (uint8_t)r->validation_code;
+    info[IDTI_USERINFO_OFF_TIMEZONE]     = (uint8_t)(r->timezone_code >> 8);
+    info[IDTI_USERINFO_OFF_TIMEZONE + 1] = (uint8_t)r->timezone_code;
+    info[IDTI_USERINFO_OFF_EXPIRED]     = (uint8_t)(r->expired_date >> 16);
+    info[IDTI_USERINFO_OFF_EXPIRED + 1] = (uint8_t)(r->expired_date >> 8);
+    info[IDTI_USERINFO_OFF_EXPIRED + 2] = (uint8_t)r->expired_date;
+    info[IDTI_USERINFO_OFF_PROXTYPE]  = r->prox_type;
+    info[IDTI_USERINFO_OFF_PROXWIEG]  = r->prox_wiegand;
+    info[IDTI_USERINFO_OFF_BIOTYPE]   = r->bio_type;
+    info[IDTI_USERINFO_OFF_BIOSUB]    = r->bio_type_sub;
+    info[IDTI_USERINFO_OFF_TMPLCOUNT] = r->template_count;
+    info[IDTI_USERINFO_OFF_PASSWORD]     = (uint8_t)(r->access_password >> 8);
+    info[IDTI_USERINFO_OFF_PASSWORD + 1] = (uint8_t)r->access_password;
+    info[IDTI_USERINFO_OFF_CANTEEN] = r->canteen_code;
+}
+
 /* 카드값이 비어 있는지 (등록된 카드가 없는 사용자) */
-static int all_zero(const uint8_t *p, size_t n)
+int userbin_all_zero(const uint8_t *p, size_t n)
 {
     for (size_t i = 0; i < n; i++)
     {
@@ -215,9 +245,9 @@ static int store_record(AcuUserBin *ub, const uint8_t *rec)
 
     AcuUserRecord r;
     memset(&r, 0, sizeof(r));
-    parse_user_info(rec + IDTI_USERBIN_OFF_USER, &r);
+    userbin_parse_user_info(rec + IDTI_USERBIN_OFF_USER, &r);
 
-    if (all_zero(r.user_id, ACU_USER_ID_LEN))
+    if (userbin_all_zero(r.user_id, ACU_USER_ID_LEN))
     {
         return -1; /* 빈 칸 — 명단의 사용하지 않는 자리다 */
     }
@@ -236,21 +266,33 @@ static int store_record(AcuUserBin *ub, const uint8_t *rec)
     }
 
     /*
-     * 카드. **바이너리에서는 앞 8byte가 뒤집혀 실린다** — 되돌려야 단일 사용자 경로의
-     * Proximity Data 앞 8byte(= 판정에 쓰는 실제 카드값)와 같아진다
-     * (`clsDevUserBin.cs`: Array.Copy(8) -> Array.Reverse -> Prox32[0..7]).
+     * 카드.
+     *
+     * 두 경로가 **바이트 순서가 서로 뒤집힌 채로** 같은 값을 나른다:
+     *   바이너리 전송     card[0..7]        = 카드 번호를 **큰 자리부터**(빅엔디언, 오른쪽 정렬)
+     *   단일 사용자 경로  Proximity Data    = 그것을 뒤집은 형태
+     *
+     * 근거 둘:
+     *   · `clsDevUserBin.cs` — `Copy(8) -> Reverse -> Prox32[0..7]` (둘이 서로 뒤집힘)
+     *   · `1.` 문서 — Card ID 예시에 **"(Reversed Bytes)"** 라고 적혀 있다:
+     *     `0xc1/0x5d/0x06/0x02` 로 실린 것이 실제로는 `02/06/5d/c1` 이다
+     * ⇒ 뒤집힌 쪽은 Proximity Data이고, **바이너리의 card[0..7]이 바로 카드 번호**다.
+     *
+     * 그래서 판정에 쓰는 `card_id`는 바이너리 값을 **그대로** 쓴다. 이벤트의 Access ID도
+     * 같은 큰 자리부터 형식이라(`1.` 문서 예시 `00/00/00/00/00/00/12/34`) 표현이 하나로 맞는다.
+     * `prox_raw`에는 단일 사용자 경로가 쓰는 뒤집힌 형태를 넣어 둔다 — 되돌려 줄 때 필요하다.
      */
     const uint8_t *bin_card = rec + IDTI_USERBIN_OFF_CARD;
-    if (!all_zero(bin_card, ACU_USER_CARD_LEN))
+    if (!userbin_all_zero(bin_card, ACU_USER_CARD_LEN))
     {
         AcuUserCard c;
         memset(&c, 0, sizeof(c));
         memcpy(c.user_id, r.user_id, ACU_USER_ID_LEN);
+        memcpy(c.card_id, bin_card, ACU_USER_CARD_LEN);
         for (int i = 0; i < ACU_USER_CARD_LEN; i++)
         {
-            c.card_id[i] = bin_card[ACU_USER_CARD_LEN - 1 - i];
+            c.prox_raw[i] = bin_card[ACU_USER_CARD_LEN - 1 - i];
         }
-        memcpy(c.prox_raw, c.card_id, ACU_USER_CARD_LEN); /* 되돌린 값이 Prox32의 앞 8byte다 */
 
         if (users_load_put_card(ub->users, &c) != 0)
         {

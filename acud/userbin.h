@@ -63,4 +63,16 @@ int userbin_in_progress(const AcuUserBin *ub);
  */
 void userbin_abort(AcuUserBin *ub);
 
+/*
+ * ---- 규약 레코드 ↔ 저장 구조체 변환 ----
+ *
+ * User Info 32byte는 **바이너리 전송과 1명씩 경로가 같은 것을 쓴다**(`3.` 문서 A절).
+ * 바이너리 쪽에서 먼저 필요해 여기 두었고, 1명씩 경로(usercmd.c)도 같은 함수를 쓴다.
+ */
+void userbin_parse_user_info(const uint8_t *info, AcuUserRecord *r);
+void userbin_build_user_info(const AcuUserRecord *r, uint8_t *info);
+
+/* 버퍼가 전부 0인지 (카드가 없는 사용자 등을 가려낼 때) */
+int userbin_all_zero(const uint8_t *p, size_t n);
+
 #endif /* ACU_USERBIN_H */
