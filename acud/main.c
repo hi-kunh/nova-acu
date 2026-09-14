@@ -19,6 +19,7 @@
 #include "loop.h"
 #include "events.h"
 #include "users.h"
+#include "userbin.h"
 #include "net.h"
 #include "discover.h"
 #include "protocol.h"
@@ -413,12 +414,20 @@ int main(int argc, char **argv)
     }
     users_seed_dummy(users);
 
+    /* 사용자 바이너리 전송 수신기. 없으면 그 명령에 Fail로 답할 뿐 나머지는 정상 동작한다 */
+    AcuUserBin *userbin = userbin_create(users);
+    if (!userbin)
+    {
+        log_msg("사용자 바이너리 수신기 생성 실패 - 전체 다운로드를 받지 못한다");
+    }
+
     AcuNet *net = net_init(cfg.tcp_port); /* 실패해도 net=NULL로 계속 진행 (출입 판정은 네트워크 없이도 동작) */
 
     net_set_inactivity_timeout(net, cfg.inactivity_seconds);
     net_set_device_identity(net, cfg.device_category, cfg.device_type);
     net_set_time_sync(net, cfg.time_sync_enabled);
     net_set_event_store(net, events, cfg.events_batch_size);
+    net_set_userbin(net, userbin);
     apply_module_layout(net, &cfg);
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
@@ -434,6 +443,7 @@ int main(int argc, char **argv)
         log_msg("이벤트 루프 생성 실패 -> 종료");
         discover_shutdown(disc);
         net_shutdown(net);
+        userbin_destroy(userbin);
         events_close(events);
         users_close(users);
         db_close(db);
@@ -535,6 +545,7 @@ int main(int argc, char **argv)
                         net_set_device_identity(net, new_cfg.device_category, new_cfg.device_type);
                         net_set_time_sync(net, new_cfg.time_sync_enabled);
                         net_set_event_store(net, events, new_cfg.events_batch_size);
+                        net_set_userbin(net, userbin);
                         apply_module_layout(net, &new_cfg);
                         net_attach_loop(net, loop);
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");
@@ -586,7 +597,8 @@ int main(int argc, char **argv)
     loop_destroy(loop);
     discover_shutdown(disc);
     net_shutdown(net);
-    events_close(events); /* net보다 뒤에 - net이 응답을 만들다 말고 저장소를 볼 수 있다 */
+    userbin_destroy(userbin); /* net보다 뒤에 - net이 받던 전송을 참조한다 */
+    events_close(events);
     users_close(users);
     db_close(db);
     hal_shutdown();

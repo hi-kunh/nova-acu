@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "loop.h"
 #include "events.h"
+#include "userbin.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -17,7 +18,17 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define NET_RECV_BUF_CAP 512
+/*
+ * 수신 버퍼.
+ *
+ * 예전에는 512byte였다 — 우리가 받던 명령이 전부 짧았기 때문이다. 그런데 **사용자 바이너리
+ * 전송의 조각은 최대 57,856byte**로 온다(`5.` 문서의 N 목록). 프레임 길이 필드가 2byte라
+ * 어떤 명령도 65,535byte를 넘지 못하므로 그 크기로 잡아 두면 길이 때문에 버리는 일이 없다.
+ * (DM 쪽 수신 버퍼도 65,584byte다 — 2026-09-11 회신 4-1)
+ */
+#define NET_RECV_BUF_CAP 65536
+/* 프레임 길이 필드는 2byte다. 버퍼가 그보다 작아지면 긴 패킷을 영영 못 받는다 */
+_Static_assert(NET_RECV_BUF_CAP > 0xFFFF, "수신 버퍼가 프레임 최대 길이보다 작다");
 
 /*
  * 한 응답에 실을 이벤트 건수.
@@ -63,6 +74,9 @@ struct AcuNet {
      */
     AcuEvents *events;
     int event_batch; /* 한 응답에 실을 최대 건수 */
+
+    /* 사용자 바이너리 전송 수신 (userbin.h). NULL이면 그 명령을 받지 않는다 */
+    AcuUserBin *userbin;
 
     /*
      * 붙어 있는 이벤트 루프. 리슨 fd와 클라이언트 fd를 여기에 등록한다.
@@ -114,6 +128,15 @@ static void set_nonblocking(int fd)
 /* 연결이 끊겼을 때 소켓과 송수신 버퍼를 함께 정리한다 */
 static void net_drop_client(AcuNet *net, const char *reason)
 {
+    /*
+     * 연결이 끊기면 받다 만 사용자 명단을 버린다. 그냥 두면 반쪽 명단을 들고 있다가
+     * 다음 Start가 이어받은 것으로 오해할 수 있다 (기존 명단은 그대로 남는다).
+     */
+    if (net->userbin && userbin_in_progress(net->userbin))
+    {
+        userbin_abort(net->userbin);
+    }
+
     if (net->client_fd >= 0)
     {
         loop_remove(net->loop, net->client_fd);
@@ -298,14 +321,15 @@ static uint32_t event_code_for_result(AccessResult result)
     }
 }
 
-void net_push_event(AcuNet *net, AccessResult result, const uint8_t *access_id, int door_status,
-                    int module_addr, int reader_addr)
+/*
+ * 이벤트 한 건을 저장소에 넣는다 (코드를 직접 주는 경로).
+ * 카드 판정 말고도 장비 자체 이벤트(사용자 파일 등록 결과 등)가 여기로 들어온다.
+ */
+static void net_store_event(AcuNet *net, uint32_t event_code, uint8_t op_mode,
+                            const uint8_t *access_id, int door_status,
+                            int module_addr, int reader_addr)
 {
-    if (!net || result == ACCESS_DENIED_DB_ERROR)
-    {
-        return; /* DB 조회 자체의 오류는 상위 시스템에 보고할 실질적 의미가 없음 */
-    }
-    if (!net->events)
+    if (!net || !net->events)
     {
         log_msg("네트워크: 이벤트 저장소가 없어 보고하지 못함 (출입 판정은 정상)");
         return;
@@ -313,22 +337,44 @@ void net_push_event(AcuNet *net, AccessResult result, const uint8_t *access_id, 
 
     AcuEvent e;
     memset(&e, 0, sizeof(e));
-    e.event_code = event_code_for_result(result);
-    e.op_mode = IDTI_OPMODE_CARD;
+    e.event_code = event_code;
+    e.op_mode = op_mode;
     /*
      * 이벤트 주소는 **1부터**다. DM은 byte 6·7을 가공 없이 화면에 쓴다
-     * (HARDWARE.md "이벤트 주소"). 어느 RRU·리더에서 온 카드인지는 호출자가 안다.
+     * (HARDWARE.md "이벤트 주소"). 어느 RRU·리더에서 온 것인지는 호출자가 안다.
      */
     e.module_addr = (uint8_t)module_addr;
     e.reader_addr = (uint8_t)reader_addr;
     e.door_status = (uint8_t)door_status;
     e.func_code = IDTI_FUNC_NONE;
     e.ts = time(NULL);
-    memcpy(e.id, access_id, sizeof(e.id));
+    if (access_id)
+    {
+        memcpy(e.id, access_id, sizeof(e.id));
+    }
 
     if (events_append(net->events, &e) != 0)
     {
         log_msg("네트워크: 이벤트 적재 실패 - 이 이벤트는 상위 시스템에 올라가지 않는다");
+    }
+}
+
+void net_push_event(AcuNet *net, AccessResult result, const uint8_t *access_id, int door_status,
+                    int module_addr, int reader_addr)
+{
+    if (!net || result == ACCESS_DENIED_DB_ERROR)
+    {
+        return; /* DB 조회 자체의 오류는 상위 시스템에 보고할 실질적 의미가 없음 */
+    }
+    net_store_event(net, event_code_for_result(result), IDTI_OPMODE_CARD,
+                    access_id, door_status, module_addr, reader_addr);
+}
+
+void net_set_userbin(AcuNet *net, AcuUserBin *ub)
+{
+    if (net)
+    {
+        net->userbin = ub;
     }
 }
 
@@ -776,6 +822,93 @@ static int handle_lcd_request(AcuNet *net, const IdtiHeader *hdr)
     return 1;
 }
 
+/*
+ * 사용자 바이너리 전송 수신 (`5.` 문서). Cmd 5 / Sub 3 / Obj 0xD0(Start)·0xD1(Continue).
+ * 처리했으면 1, 우리 명령이 아니면 0.
+ *
+ * 응답은 Data(1) = Success(1) / Fail(2). **Fail을 받으면 PC가 직전 조각을 다시 보낸다.**
+ */
+static int handle_userbin_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
+{
+    int is_start = (hdr->object == IDTI_OBJ_USERBIN_START);
+    int is_continue = (hdr->object == IDTI_OBJ_USERBIN_CONTINUE);
+
+    if (!is_start && !is_continue)
+    {
+        return 0;
+    }
+    if (hdr->command != IDTI_CMD_SND_DATA || hdr->sub_command != IDTI_SUBCMD_WRITE)
+    {
+        return 0; /* 같은 오브젝트의 읽기 방향(PC가 우리 명단을 받아 가는 것)은 아직 미구현 */
+    }
+
+    const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;
+    size_t data_len = hdr->data_len;
+    uint8_t ack = IDTI_ACK_FAIL;
+
+    if (!net->userbin)
+    {
+        log_msg("네트워크: 사용자 바이너리 수신기가 없다 - Fail로 답한다");
+    }
+    else if (is_start)
+    {
+        /* Data(10) = 총 크기(4) + 총 인원(4) + OBJ(1) + Rev(1) */
+        if (data_len < 10)
+        {
+            log_msg("네트워크: 사용자 바이너리 Start 데이터가 짧다 - Fail로 답한다");
+        }
+        else
+        {
+            uint32_t total_size = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+                                  ((uint32_t)data[2] << 8) | data[3];
+            uint32_t total_count = ((uint32_t)data[4] << 24) | ((uint32_t)data[5] << 16) |
+                                   ((uint32_t)data[6] << 8) | data[7];
+            if (userbin_start(net->userbin, total_size, total_count, data[8]) == 0)
+            {
+                ack = IDTI_ACK_SUCCESS;
+            }
+        }
+    }
+    else /* Continue */
+    {
+        /* Data(2+N) = Index(2) + 원시 데이터 N */
+        if (data_len < 2)
+        {
+            log_msg("네트워크: 사용자 바이너리 Continue 데이터가 짧다 - Fail로 답한다");
+        }
+        else
+        {
+            uint16_t index = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+            AcuUserBinStatus st = userbin_continue(net->userbin, index, data + 2, data_len - 2);
+
+            if (st != USERBIN_FAILED)
+            {
+                ack = IDTI_ACK_SUCCESS;
+            }
+            if (st == USERBIN_COMPLETE)
+            {
+                /*
+                 * 명단이 장비에 실제로 들어갔다는 표식을 올린다 (`5.` 문서 Added Event Code).
+                 * DM은 이것 말고는 확인할 방법이 없다 - 9/11 회신의 "DB 설정 ≠ 장비 설정".
+                 * 주소는 컨트롤러 자체 이벤트라 첫 모듈·리더 0으로 둔다.
+                 */
+                net_store_event(net, userbin_result_event(net->userbin), IDTI_OPMODE_NONE,
+                                NULL, net->door_status, IDTI_EVENT_ADDR_FIRST_MODULE, 0);
+            }
+        }
+    }
+
+    send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object,
+                  &ack, 1, 1, 1, 1, 1);
+
+    char line[160];
+    snprintf(line, sizeof(line), "네트워크: 사용자 바이너리 %s -> %s",
+             is_start ? "Start" : "Continue",
+             (ack == IDTI_ACK_SUCCESS) ? "Success" : "Fail");
+    log_msg(line);
+    return 1;
+}
+
 static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
     /*
@@ -798,6 +931,11 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pk
         hdr->object == IDTI_OBJ_FIRMWARE)
     {
         handle_firmware_request(net, hdr);
+        return;
+    }
+
+    if (handle_userbin_request(net, hdr, pkt))
+    {
         return;
     }
 
@@ -904,12 +1042,10 @@ static void net_on_client_ready(int fd, unsigned events, void *user)
             consumed = net->recv_len;
             break;
         }
-        if (hdr.packet_length > NET_RECV_BUF_CAP)
-        {
-            log_msg("네트워크: 패킷 길이가 수신 버퍼보다 커서 버림");
-            consumed = net->recv_len;
-            break;
-        }
+        /*
+         * 길이 때문에 버리는 경우는 이제 없다 — 프레임 길이 필드가 2byte라 어떤 패킷도
+         * 65,535byte를 넘지 못하고, 버퍼가 그보다 크다. 아래 검사가 그 전제를 지킨다.
+         */
         if (avail < hdr.packet_length)
         {
             break; /* 아직 패킷 전체가 도착하지 않음 */

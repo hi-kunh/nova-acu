@@ -25,13 +25,26 @@ static double now_sec(void)
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-/* i번째 사용자의 ID와 카드값을 만든다 (둘 다 8byte, 겹치지 않게) */
+/*
+ * i번째 사용자의 ID와 카드값을 만든다 (둘 다 8byte).
+ *
+ * **바이트 순서가 성능을 크게 바꾼다.** 둘 다 BLOB 기본키라 SQLite가 바이트 순으로 비교하는데,
+ * 리틀엔디언으로 만들면 앞 바이트가 빠르게 바뀌어 키가 흩어지고 B-tree가 여기저기 쪼개진다.
+ * 보드 실측으로 **2배 넘게 느려졌다.**
+ *
+ *   user_id : **빅엔디언 = 증가 순서**. 규약의 User ID가 그렇고(`3.` 문서 A절: 숫자만,
+ *             0x00..0x01 ~ 0x99..0x99), DM도 순서대로 보낸다 -> 뒤에 붙기만 한다
+ *   card_id : **흩어지게** 만든다. 카드 번호는 순서와 무관한 실제 값이라 이쪽이 현실에 가깝다
+ */
 static void make_ids(long long i, uint8_t user_id[8], uint8_t card_id[8])
 {
+    uint64_t uid = (uint64_t)(i + 1);
+    uint64_t cid = (uint64_t)i * 2654435761ULL + 0x5A5A0000ULL; /* 곱셈 해시로 흩뜨린다 */
+
     for (int b = 0; b < 8; b++)
     {
-        user_id[b] = (uint8_t)((i >> (b * 8)) & 0xFF);
-        card_id[b] = (uint8_t)(((i + 0x5A5A0000) >> (b * 8)) & 0xFF);
+        user_id[b] = (uint8_t)((uid >> ((7 - b) * 8)) & 0xFF);
+        card_id[b] = (uint8_t)((cid >> ((7 - b) * 8)) & 0xFF);
     }
 }
 

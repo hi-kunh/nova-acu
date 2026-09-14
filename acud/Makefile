@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -O2
 LDLIBS  = -lsqlite3 -lcjson
 TARGET  = acud
-SRC     = main.c log.c db.c events.c users.c access.c hal_mock.c config.c protocol.c loop.c net.c discover.c
+SRC     = main.c log.c db.c events.c users.c userbin.c access.c hal_mock.c config.c protocol.c loop.c net.c discover.c
 
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDLIBS)

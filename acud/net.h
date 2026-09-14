@@ -6,6 +6,7 @@
 #include "access.h"
 #include "loop.h"
 #include "events.h"
+#include "userbin.h"
 
 /*
  * 네트워크 통신부 (5단계, IDTi 프로토콜 V2, TCP 전용).
@@ -58,6 +59,12 @@ int net_attach_loop(AcuNet *net, AcuLoop *loop);
  *   다른 장비 폴링이 밀린다 (2026-09-11 DM 회신 4-6의 권고 구간).
  */
 void net_set_event_store(AcuNet *net, AcuEvents *store, int batch_size);
+
+/*
+ * 사용자 바이너리 전송(`5.` 문서, Cmd 5 / Sub 3 / Obj 0xD0·0xD1) 수신기를 붙인다.
+ * NULL이면 그 명령에 Fail로 답한다. 연결이 끊기면 net이 받다 만 전송을 버린다.
+ */
+void net_set_userbin(AcuNet *net, AcuUserBin *ub);
 
 /*
  * 유휴 타임아웃을 검사해 필요하면 연결을 닫는다.

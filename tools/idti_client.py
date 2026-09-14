@@ -40,6 +40,7 @@ CMD_SND_DATA = 0x05
 CMD_REQ_DATA = 0x06
 
 SUBCMD_READ = 0x02
+SUBCMD_WRITE = 0x03       # 사용자 바이너리 전송(5. 문서)이 쓰는 Sub Command
 
 OBJ_HISTORY = 0x01
 OBJ_FIRMWARE = 0x2A          # 42. PC가 접속 후 장치 상태를 물을 때 쓰는 오브젝트
@@ -59,6 +60,10 @@ EVENT_NAMES = {
     0x01020102: "Access Denied By Card (거부)",
     0x01020108: "Access Denied By Not Enabled (거부: 비활성 카드)",
     0x01020109: "Access Denied By Time (거부: 시간대)",
+    # 사용자 파일(바이너리) 등록 결과 - 5. UserBinaryTransmit 문서 "Added Event Code"
+    0x101D0101: "User File Register Success (일부 사용자 미등록)",
+    0x101D0102: "User File Register All Success (전부 등록)",
+    0x101D0103: "User File Register All Fail (전부 실패)",
 }
 
 DOOR_STATUS_NAMES = {0x00: "None", 0x01: "Open(Not Closed)", 0x02: "Closed"}
@@ -259,12 +264,119 @@ def recv_packet(sock, timeout):
         return buf if buf else None
 
 
+# ---- 사용자 바이너리 전송 (5. IDTi Protocol UserBinaryTransmit.doc) ----
+#
+# DM이 명단 전체를 내려보내는 경로를 흉내 낸다. SSC-324가 쓰는 _SSCUserInfo(128byte)를 만든다.
+#   0 flag[4] / 4 serial[4] / 8 user[32] / 40 card[12] / 52 name[16]
+#   68 restrict[8] / 76 grpcode[16] / 92 apb[1] / 93 reserved[33] / 126 crc_calc / 127 datacrc
+
+USERBIN_REC_LEN = 128
+OBJ_USERBIN_START, OBJ_USERBIN_CONTINUE = 0xD0, 0xD1
+ACK_NAMES = {0x01: "Success", 0x02: "Fail"}
+
+
+def make_user_record(serial, user_id, card_id, enabled=True,
+                     validation=0, timezone=0, level=1):
+    """_SSCUserInfo 한 명(128byte). user_id·card_id는 8byte."""
+    rec = bytearray(USERBIN_REC_LEN)
+    rec[0:4] = serial.to_bytes(4, "big")
+    rec[4:8] = serial.to_bytes(4, "big")
+
+    info = bytearray(32)
+    info[0:8] = user_id
+    # Access Option 4byte. Enabled는 Option1[0]의 MSB (3. 문서 A절: 1000 0000 = 0x80)
+    info[12] = 0x80 if enabled else 0x00
+    info[16] = level
+    info[17:19] = validation.to_bytes(2, "big")
+    info[19:21] = timezone.to_bytes(2, "big")
+    info[21:24] = b"\xff\xff\xff"          # Access Expired: 없음
+    rec[8:40] = info
+
+    # 카드 12byte — 앞 8byte는 **뒤집어서** 싣는다 (clsDevUserBin.cs의 Array.Reverse)
+    rec[40:48] = bytes(reversed(card_id))
+
+    rec[52:68] = b" " * 16                    # LCD 이름
+    rec[126] = 0x01                           # crc_calc 고정값
+
+    crc = 0
+    for b in rec[8:127]:                      # user[0] ~ crc_calc 의 XOR
+        crc ^= b
+    rec[127] = crc
+    return bytes(rec)
+
+
+def send_userbin(sock, timeout, count, chunk_size, raw=False, corrupt=False):
+    """Start -> Continue... 로 사용자 count명을 보낸다. 반환: 0=성공"""
+    blob = bytearray()
+    for i in range(count):
+        uid = (i + 1).to_bytes(8, "big")
+        cid = (0x5A5A0000 + i).to_bytes(8, "big")
+        # 첫 세 명은 판정 경로가 갈리게 만든다 (허용 / 비활성 / 시간대 거부)
+        enabled = (i != 1)
+        timezone = 2 if i == 2 else 0
+        blob += make_user_record(i, uid, cid, enabled=enabled, timezone=timezone)
+
+    if corrupt and len(blob) >= USERBIN_REC_LEN:
+        b = bytearray(blob)
+        b[127] ^= 0xFF                        # 첫 레코드의 검사값을 망가뜨린다
+        blob = b
+
+    total_size, total_count = len(blob), count
+    print(f"사용자 바이너리 전송: {total_count}명 / {total_size}byte / 조각 {chunk_size}byte")
+
+    # Start
+    data = total_size.to_bytes(4, "big") + total_count.to_bytes(4, "big") + bytes([0x01, 0x00])
+    req = build_request(CMD_SND_DATA, SUBCMD_WRITE, OBJ_USERBIN_START, frame_index=1, data=data)
+    if raw:
+        print(f"송신 Start {len(req)}byte: {req.hex()}")
+    sock.sendall(req)
+    resp = recv_packet(sock, timeout)
+    ack = userbin_ack(resp)
+    print(f"  Start    -> {ACK_NAMES.get(ack, ack)}")
+    if ack != 0x01:
+        return 1
+
+    # Continue
+    index = 0
+    off = 0
+    frame_index = 2
+    while off < total_size:
+        part = blob[off:off + chunk_size]
+        data = index.to_bytes(2, "big") + bytes(part)
+        req = build_request(CMD_SND_DATA, SUBCMD_WRITE, OBJ_USERBIN_CONTINUE,
+                            frame_index=frame_index, data=data)
+        sock.sendall(req)
+        resp = recv_packet(sock, timeout)
+        ack = userbin_ack(resp)
+        print(f"  Continue {index:>4} ({len(part):>6}byte) -> {ACK_NAMES.get(ack, ack)}")
+        if ack != 0x01:
+            return 1
+        off += len(part)
+        index += 1
+        frame_index += 1
+
+    print("전송 끝 - 장치가 명단을 교체했다면 History에 사용자 파일 등록 이벤트가 올라온다")
+    return 0
+
+
+def userbin_ack(resp):
+    """응답에서 Result 1byte를 꺼낸다 (장치상태 뒤에 붙는다). 없으면 None"""
+    if resp is None or len(resp) < HEADER_LEN + 1:
+        return None
+    body = resp[HEADER_LEN:-TAIL_LEN]
+    opt = int.from_bytes(resp[4:6], "big")
+    if not (opt & FOPT_EXCLUDE_DEVICE_STATUS) and len(body) >= DEVICE_STATUS_V2_LEN:
+        body = body[DEVICE_STATUS_V2_LEN:]
+    return body[0] if body else None
+
+
 def main():
     ap = argparse.ArgumentParser(description="ACU IDTi V2 테스트 클라이언트")
     ap.add_argument("--host", default="127.0.0.1", help="ACU 주소 (기본 127.0.0.1)")
     ap.add_argument("--port", type=int, default=9870, help="ACU 포트 (기본 9870)")
     ap.add_argument("--request",
-                    choices=["history", "status", "lcd-check", "lcd-change", "lang-check", "lang-change"],
+                    choices=["history", "status", "lcd-check", "lcd-change", "lang-check", "lang-change",
+                             "userbin"],
                     default="history",
                     help="history=이벤트 로그 조회(기본), "
                          "status=장치 상태 요청(RequestStatus/Read/Firmware — PC가 접속 후 보내는 첫 명령)")
@@ -275,6 +387,11 @@ def main():
     ap.add_argument("--count", type=int, default=1, help="요청 횟수 (--watch면 무시)")
     ap.add_argument("--timeout", type=float, default=3.0, help="응답 대기 시간(초, 기본 3)")
     ap.add_argument("--raw", action="store_true", help="주고받은 바이트를 hex로 함께 출력")
+    ap.add_argument("--users", type=int, default=10, help="--request userbin: 보낼 사용자 수 (기본 10)")
+    ap.add_argument("--chunk", type=int, default=1664,
+                    help="--request userbin: 조각 크기 (규약 값 1664/3616/7232/14464/28928/57856)")
+    ap.add_argument("--corrupt", action="store_true",
+                    help="--request userbin: 첫 레코드의 검사값을 망가뜨려 부분 실패를 시험한다")
     args = ap.parse_args()
 
     # LCD 명령 4종의 Command/Sub/Object (근거: isldev/clsDevCommand.cs). 우리 장비에는 LCD가 없다
@@ -296,6 +413,19 @@ def main():
     else:  # lang-change
         command, sub, obj = CMD_SND_STATUS, SUBCMD_CHANGE, OBJ_MULTI_LANGUAGE
         data = bytes([7])  # Korean
+
+    if args.request == "userbin":
+        try:
+            sock = socket.create_connection((args.host, args.port), timeout=args.timeout)
+        except OSError as e:
+            print(f"접속 실패 {args.host}:{args.port} - {e}")
+            return 1
+        print(f"접속됨 {args.host}:{args.port}")
+        try:
+            return send_userbin(sock, args.timeout, args.users, args.chunk,
+                                raw=args.raw, corrupt=args.corrupt)
+        finally:
+            sock.close()
 
     frame_option = FOPT_REQUEST_ACK | FOPT_TCP
     if args.exclude_status:

@@ -90,8 +90,85 @@
 #define IDTI_EVENT_ACCESS_DENIED_NOT_ENABLED 0x01020108u
 #define IDTI_EVENT_ACCESS_DENIED_BY_TIME     0x01020109u
 
+/*
+ * 사용자 파일(바이너리) 등록 결과 — `5. IDTi Protocol UserBinaryTransmit.doc` "Added Event Code".
+ * DM이 "명단이 장비에 실제로 들어갔는가"를 아는 유일한 표식이다
+ * (9/11 회신의 "DB 설정 ≠ 장비 설정" 문제와 같은 맥락).
+ */
+#define IDTI_EVENT_USERFILE_PARTIAL 0x101D0101u /* 일부 사용자가 등록되지 않음 */
+#define IDTI_EVENT_USERFILE_SUCCESS 0x101D0102u /* 전부 등록 성공 */
+#define IDTI_EVENT_USERFILE_FAIL    0x101D0103u /* 전부 실패 */
+
+/*
+ * 사용자 바이너리 전송 (`5.` 문서). PC -> 장치.
+ *   Start    Cmd 0x05 / Sub 0x03 / Obj 0xD0, Data(10) = 총 크기(4) + 총 인원(4) + OBJ(1) + Rev(1)
+ *   Continue Cmd 0x05 / Sub 0x03 / Obj 0xD1, Data(2+N) = Index(2) + 원시 데이터 N
+ * 응답은 Data(1) = Success(1) / Fail(2). Fail을 받으면 PC가 **직전 패킷을 다시 보낸다.**
+ */
+#define IDTI_OBJ_USERBIN_START    0xD0
+#define IDTI_OBJ_USERBIN_CONTINUE 0xD1
+
+/* Binary OBJ (Start의 Data 9번째 byte) */
+#define IDTI_USERBIN_OBJ_INFO        0x01 /* _SSCUserInfo       128byte */
+#define IDTI_USERBIN_OBJ_INFO_FINGER 0x02 /* _SSCUserInfoFinger 1808byte (128 + 420*4) */
+
+/*
+ * `_SSCUserInfo` 128byte — **SSC-314/324가 쓰는 구조**다 (`5.` 문서).
+ * 우리는 SSC-324 대체이므로 이것이 기준이다.
+ *
+ *   0   flag[4]      사용자 인덱스
+ *   4   serial[4]    사용자 인덱스
+ *   8   user[32]     User Info (규약 A절)
+ *   40  card[12]     User Card — **앞 8byte가 뒤집혀 실린다** (아래 주의)
+ *   52  name[16]     LCD 표시 이름
+ *   68  restrict[8]  Restriction (단일 사용자 경로에서는 16byte)
+ *   76  grpcode[16]  그룹 코드 2 x 8
+ *   92  apb[1]       0x00
+ *   93  reserved[33] 0x00
+ *   126 crc_calc[1]  0x01
+ *   127 datacrc[1]   user[0]부터 crc_calc까지의 XOR
+ *
+ * ⚠ **카드 바이트 뒤집기** — `clsDevUserBin.cs`에 이렇게 적혀 있다:
+ *   "실제 사용 바이트는 8 바이트 이고, 단말기의 바이너리 전송 처리를 위해
+ *    카드정보 송/수신시 꼬았던 바이트를 원래대로 복구시켜서 보내야 함"
+ * 코드도 `Array.Copy(8) -> Array.Reverse -> Prox32[0..7]`이다.
+ * 즉 **바이너리의 card[0..7]을 뒤집으면 단일 사용자 경로의 Proximity Data 앞 8byte**가 된다.
+ */
+#define IDTI_USERBIN_REC_INFO_LEN        128
+#define IDTI_USERBIN_REC_INFO_FINGER_LEN 1808
+
+#define IDTI_USERBIN_OFF_USER      8
+#define IDTI_USERBIN_OFF_CARD      40
+#define IDTI_USERBIN_LEN_CARD      12
+#define IDTI_USERBIN_OFF_NAME      52
+#define IDTI_USERBIN_OFF_RESTRICT  68
+#define IDTI_USERBIN_LEN_RESTRICT  8
+#define IDTI_USERBIN_OFF_GROUP     76
+#define IDTI_USERBIN_OFF_CRC_CALC  126
+#define IDTI_USERBIN_OFF_DATACRC   127
+
+/* User Info 32byte 안의 배치 (`3.` 문서 A절, isldev clsDevUser.cs) */
+#define IDTI_USERINFO_LEN            32
+#define IDTI_USERINFO_OFF_ID          0
+#define IDTI_USERINFO_OFF_GENGROUP    8
+#define IDTI_USERINFO_OFF_RESERVED    9
+#define IDTI_USERINFO_OFF_REVISION   10
+#define IDTI_USERINFO_OFF_OPTION     12
+#define IDTI_USERINFO_OFF_LEVEL      16
+#define IDTI_USERINFO_OFF_VALIDATION 17
+#define IDTI_USERINFO_OFF_TIMEZONE   19
+#define IDTI_USERINFO_OFF_EXPIRED    21
+#define IDTI_USERINFO_OFF_PROXTYPE   24
+#define IDTI_USERINFO_OFF_PROXWIEG   25
+#define IDTI_USERINFO_OFF_BIOTYPE    26
+#define IDTI_USERINFO_OFF_BIOSUB     27
+#define IDTI_USERINFO_OFF_TMPLCOUNT  28
+#define IDTI_USERINFO_OFF_PASSWORD   29
+#define IDTI_USERINFO_OFF_CANTEEN    31
+
 /* Operation Mode (Event Info 내) */
 #define IDTI_OPMODE_CARD 0x02
+#define IDTI_OPMODE_NONE 0x00 /* 카드 태그가 아닌 장비 자체 이벤트 (파일 등록 결과 등) */
 
 /* Door Status */
 #define IDTI_DOOR_STATUS_NONE   0x00
