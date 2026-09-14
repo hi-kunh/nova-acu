@@ -4,6 +4,7 @@
 #include "net.h"
 #include "protocol.h"
 #include "loop.h"
+#include "events.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -17,18 +18,23 @@
 #include <netinet/in.h>
 
 #define NET_RECV_BUF_CAP 512
-#define NET_RESP_BUF_CAP 1024 /* 응답 1건 최대: Header 44 + DeviceStatus 234 + Firmware 268 + Tail 2 = 548 */
-#define NET_SEND_BUF_CAP 4096 /* 응답 1건(316byte)보다 넉넉히. 부분 전송분을 담아 둔다 */
-#define NET_EVENT_QUEUE_CAP 32
 
-typedef struct {
-    uint32_t event_code;
-    uint8_t  id[8];
-    uint8_t  door_status;
-    uint8_t  module_addr; /* 이벤트 주소: 모듈 번호 1~ (DM 파서가 원시값을 그대로 쓴다) */
-    uint8_t  reader_addr; /* 리더 번호 1·2 */
-    time_t   ts;
-} NetEvent;
+/*
+ * 한 응답에 실을 이벤트 건수.
+ *
+ * 프레임 길이 필드가 2byte라 이론상 약 1,810건까지 들어가지만, **DM은 이벤트 1건마다
+ * INSERT + 정책 검사를 폴링 스레드에서 순차로** 한다. 한 번에 많이 보내면 그동안 다른 장비의
+ * 폴링이 밀린다 -> DM 권고는 **한 응답 200~500건**이다 (2026-09-11 회신 4-6).
+ * 기본값은 권고 구간의 아래쪽을 잡았다. 폴링 주기가 3초이므로 200건이면 분당 4,000건이다.
+ */
+#define NET_EVENT_BATCH_DEFAULT 200
+#define NET_EVENT_BATCH_MAX     500
+
+#define NET_EVENT_DATA_CAP (NET_EVENT_BATCH_MAX * IDTI_EVENT_INFO_LEN) /* 18,000 */
+/* 응답 payload = 장치상태 + (이벤트 묶음 또는 Firmware Info) 중 큰 쪽 */
+#define NET_PAYLOAD_CAP (IDTI_DEVICE_STATUS_V2_LEN + NET_EVENT_DATA_CAP)
+#define NET_RESP_BUF_CAP (NET_PAYLOAD_CAP + 128)  /* + 헤더 44 · 주소 · CS/ETX */
+#define NET_SEND_BUF_CAP (NET_RESP_BUF_CAP * 2)   /* 부분 전송분을 담아 둘 여유 */
 
 struct AcuNet {
     int listen_fd;
@@ -42,11 +48,21 @@ struct AcuNet {
     size_t  send_len; /* 버퍼에 쌓인 총 바이트 */
     size_t  send_off; /* 그중 이미 보낸 바이트 */
 
+    /*
+     * 응답 조립용 버퍼. 이벤트를 최대 500건까지 실으면 20KB에 가까워져 스택에 두기 부담스럽다.
+     * 응답은 한 번에 하나만 만들므로 여기 한 벌만 둔다.
+     */
+    uint8_t payload_buf[NET_PAYLOAD_CAP];
+    uint8_t resp_buf[NET_RESP_BUF_CAP];
+
     int door_status; /* IDTI_DOOR_STATUS_*, Device Status 응답에 반영 */
 
-    NetEvent queue[NET_EVENT_QUEUE_CAP];
-    size_t queue_head;
-    size_t queue_count;
+    /*
+     * 이벤트 저장소(events.h). 예전에는 여기 메모리 큐 32칸이 있었지만 재부팅하면 사라졌다.
+     * NULL이면 이벤트를 보고하지 않는다 (출입 판정 자체는 계속 동작해야 한다).
+     */
+    AcuEvents *events;
+    int event_batch; /* 한 응답에 실을 최대 건수 */
 
     /*
      * 붙어 있는 이벤트 루프. 리슨 fd와 클라이언트 fd를 여기에 등록한다.
@@ -307,28 +323,49 @@ void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int do
     {
         return; /* DB 조회 자체의 오류는 상위 시스템에 보고할 실질적 의미가 없음 */
     }
-
-    if (net->queue_count == NET_EVENT_QUEUE_CAP)
+    if (!net->events)
     {
-        /* 큐가 가득 차면 가장 오래된 이벤트를 버리고 계속 진행 (fail-safe) */
-        net->queue_head = (net->queue_head + 1) % NET_EVENT_QUEUE_CAP;
-        net->queue_count--;
-        log_msg("네트워크: 이벤트 큐가 가득 차 가장 오래된 이벤트를 버림");
+        log_msg("네트워크: 이벤트 저장소가 없어 보고하지 못함 (출입 판정은 정상)");
+        return;
     }
 
-    size_t idx = (net->queue_head + net->queue_count) % NET_EVENT_QUEUE_CAP;
-    NetEvent *ev = &net->queue[idx];
-    ev->event_code = event_code_for_result(result);
-    hex_to_bytes(id_hex, ev->id, sizeof(ev->id));
-    ev->door_status = (uint8_t)door_status;
+    AcuEvent e;
+    memset(&e, 0, sizeof(e));
+    e.event_code = event_code_for_result(result);
+    e.op_mode = IDTI_OPMODE_CARD;
     /*
      * 이벤트 주소는 **1부터**다. DM은 byte 6·7을 가공 없이 화면에 쓴다
      * (HARDWARE.md "이벤트 주소"). 어느 RRU·리더에서 온 카드인지는 호출자가 안다.
      */
-    ev->module_addr = (uint8_t)module_addr;
-    ev->reader_addr = (uint8_t)reader_addr;
-    ev->ts = time(NULL);
-    net->queue_count++;
+    e.module_addr = (uint8_t)module_addr;
+    e.reader_addr = (uint8_t)reader_addr;
+    e.door_status = (uint8_t)door_status;
+    e.func_code = IDTI_FUNC_NONE;
+    e.ts = time(NULL);
+    hex_to_bytes(id_hex, e.id, sizeof(e.id));
+
+    if (events_append(net->events, &e) != 0)
+    {
+        log_msg("네트워크: 이벤트 적재 실패 - 이 이벤트는 상위 시스템에 올라가지 않는다");
+    }
+}
+
+void net_set_event_store(AcuNet *net, AcuEvents *store, int batch_size)
+{
+    if (!net)
+    {
+        return;
+    }
+    net->events = store;
+    if (batch_size <= 0)
+    {
+        batch_size = NET_EVENT_BATCH_DEFAULT;
+    }
+    if (batch_size > NET_EVENT_BATCH_MAX)
+    {
+        batch_size = NET_EVENT_BATCH_MAX;
+    }
+    net->event_batch = batch_size;
 }
 
 /* Protocol V2 Device Status(234byte) = DeviceType(2)+CurDateTime(6)+ExistedModule(2)+IOModuleStatus(16*14).
@@ -432,19 +469,19 @@ static void build_firmware_info(uint8_t out[IDTI_FIRMWARE_INFO_LEN], int categor
     /* out[12..267] Reserved = 0 (memset로 처리됨) */
 }
 
-static void build_event_info(uint8_t out[IDTI_EVENT_INFO_LEN], const NetEvent *ev)
+static void build_event_info(uint8_t out[IDTI_EVENT_INFO_LEN], const AcuEvent *ev)
 {
     memset(out, 0, IDTI_EVENT_INFO_LEN);
     out[0] = (uint8_t)(ev->event_code >> 24);
     out[1] = (uint8_t)(ev->event_code >> 16);
     out[2] = (uint8_t)(ev->event_code >> 8);
     out[3] = (uint8_t)(ev->event_code);
-    out[4] = IDTI_OPMODE_CARD;
+    out[4] = ev->op_mode;
     out[5] = 0x00; /* Reserved */
     out[6] = ev->module_addr; /* Module Address (1부터) */
     out[7] = ev->reader_addr; /* Reader Address (1·2) */
     out[8] = ev->door_status;
-    out[9] = IDTI_FUNC_NONE;
+    out[9] = ev->func_code;
 
     struct tm tmv;
     localtime_r(&ev->ts, &tmv);
@@ -476,9 +513,15 @@ static int send_response(AcuNet *net, const IdtiHeader *hdr,
                          uint16_t block_start, uint16_t block_end,
                          uint16_t block_count, uint16_t block_one_len)
 {
-    /* Device Status + 가장 큰 오브젝트 데이터(Firmware Info)를 담을 수 있어야 한다 */
-    uint8_t payload[IDTI_DEVICE_STATUS_V2_LEN + IDTI_FIRMWARE_INFO_LEN];
+    /* Device Status + 오브젝트 데이터(Firmware Info 또는 이벤트 묶음). net 안의 버퍼를 쓴다 */
+    uint8_t *payload = net->payload_buf;
     size_t payload_len = 0;
+
+    if (data_len > NET_PAYLOAD_CAP - IDTI_DEVICE_STATUS_V2_LEN)
+    {
+        log_msg("네트워크: 응답 데이터가 버퍼보다 커서 보내지 못함");
+        return -1;
+    }
 
     int exclude_status = (hdr->frame_option & IDTI_FOPT_EXCLUDE_DEVICE_STATUS) ? 1 : 0;
     if (!exclude_status)
@@ -505,8 +548,8 @@ static int send_response(AcuNet *net, const IdtiHeader *hdr,
 
     uint16_t resp_option = exclude_status ? IDTI_FOPT_EXCLUDE_DEVICE_STATUS : 0;
 
-    uint8_t out[NET_RESP_BUF_CAP];
-    int n = idti_build_packet(out, sizeof(out), dest_addr, src_addr,
+    uint8_t *out = net->resp_buf;
+    int n = idti_build_packet(out, NET_RESP_BUF_CAP, dest_addr, src_addr,
                                resp_option, hdr->frame_index, hdr->password,
                                command, sub_command, object,
                                hdr->start_item, hdr->end_item,
@@ -604,33 +647,69 @@ static void apply_time_sync(AcuNet *net, const uint8_t *data, size_t data_len)
 
 static void handle_history_request(AcuNet *net, const IdtiHeader *hdr)
 {
-    uint8_t event[IDTI_EVENT_INFO_LEN];
-    size_t data_len = 0;
-    uint16_t start = 0, end = 0, count = 0, one_len = 0;
+    /*
+     * 이벤트를 **여러 건 묶어** 보낸다. 예전에는 한 요청에 1건씩 올렸는데, 폴링이 3초라
+     * 쌓인 이벤트를 비우는 데 건당 3초가 걸렸다 (1,000건이면 50분).
+     *
+     * 건수는 헤더가 알려 준다 — DM은 **데이터 길이 ÷ OneDataBlockSize** 로 센다
+     * (2026-09-11 DM 회신 4-1). OneDataBlockSize에 이벤트 한 건의 크기(36)를 넣는다.
+     */
+    /* 단일 스레드라 static으로 둔다 - 최대 묶음이면 합쳐서 30KB가 넘어 스택에 두기 부담스럽다 */
+    static AcuEvent batch[NET_EVENT_BATCH_MAX];
+    static uint8_t  data[NET_EVENT_DATA_CAP];
 
-    int event_attached = 0;
-    if (net->queue_count > 0)
+    int n = 0;
+    if (net->events)
     {
-        /* 큐에서 꺼내는 것은 전송에 성공한 뒤에 한다 (전송이 실패하면 이벤트가 유실되므로) */
-        build_event_info(event, &net->queue[net->queue_head]);
-        data_len = IDTI_EVENT_INFO_LEN;
-        start = 1; end = 1; count = 1;
-        one_len = IDTI_EVENT_INFO_LEN;
-        event_attached = 1;
-    }
-
-    if (send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, IDTI_OBJ_HISTORY,
-                      event, data_len, start, end, count, one_len) == 0)
-    {
-        if (event_attached)
+        n = events_fetch(net->events, batch, net->event_batch);
+        if (n < 0)
         {
-            net->queue_head = (net->queue_head + 1) % NET_EVENT_QUEUE_CAP;
-            net->queue_count--;
+            n = 0;
         }
     }
-    else if (event_attached)
+
+    for (int i = 0; i < n; i++)
     {
-        log_msg("네트워크: 응답을 보내지 못해 이벤트를 큐에 남겨 둠 (다음 요청 때 다시 전송)");
+        build_event_info(data + (size_t)i * IDTI_EVENT_INFO_LEN, &batch[i]);
+    }
+
+    size_t data_len = (size_t)n * IDTI_EVENT_INFO_LEN;
+    uint16_t start = (n > 0) ? 1 : 0;
+    uint16_t end = (uint16_t)n;
+    uint16_t count = (uint16_t)n;
+    uint16_t one_len = (n > 0) ? IDTI_EVENT_INFO_LEN : 0;
+
+    if (send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, IDTI_OBJ_HISTORY,
+                      data, data_len, start, end, count, one_len) != 0)
+    {
+        if (n > 0)
+        {
+            log_msg("네트워크: 응답을 보내지 못해 이벤트를 남겨 둠 (다음 요청 때 다시 전송)");
+        }
+        return;
+    }
+
+    if (n <= 0)
+    {
+        return;
+    }
+
+    /*
+     * 전송 위치는 **응답을 보낸 뒤에** 전진시킨다. 먼저 옮기면 전송이 실패했을 때 이벤트가
+     * 사라진다. 반대로 여기서 전원이 끊기면 같은 이벤트를 한 번 더 보내게 되는데,
+     * 잃는 것보다 겹치는 편이 낫다 (DM은 이벤트를 그대로 INSERT 한다).
+     */
+    if (events_ack(net->events, batch[n - 1].seq) != 0)
+    {
+        log_msg("네트워크: 전송 위치를 저장하지 못했다 - 다음 요청에 같은 이벤트가 다시 나갈 수 있다");
+    }
+
+    if (n >= net->event_batch)
+    {
+        char line[160];
+        long long left = events_pending(net->events);
+        snprintf(line, sizeof(line), "네트워크: 이벤트 %d건 전송 (미전송 %lld건 남음)", n, left);
+        log_msg(line);
     }
 }
 

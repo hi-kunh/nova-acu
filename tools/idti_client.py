@@ -207,18 +207,33 @@ def parse_response(pkt):
             out.append(f"  [Firmware] 데이터 부족 ({len(body)}byte, 268 필요)")
         return out
 
-    if len(body) >= EVENT_INFO_LEN:
-        ev = body[:EVENT_INFO_LEN]
+    # 이벤트는 한 응답에 여러 건 실린다 (DM 권고 200~500건). 건수는 데이터 길이 / 36 이다.
+    event_count = len(body) // EVENT_INFO_LEN
+    if event_count == 0:
+        out.append("  [Event] 없음 (대기 중인 이벤트가 없음)")
+        return out
+
+    # 많이 오면 앞뒤만 보여 준다 (수백 건이 스크롤을 덮지 않게)
+    HEAD, TAIL = 3, 2
+    show = set(range(min(HEAD, event_count))) | set(range(max(0, event_count - TAIL), event_count))
+    if event_count > 1:
+        out.append(f"  [Event] {event_count}건")
+
+    for i in range(event_count):
+        ev = body[i * EVENT_INFO_LEN:(i + 1) * EVENT_INFO_LEN]
+        if i not in show:
+            if i == HEAD:
+                out.append(f"          ... {event_count - HEAD - TAIL}건 생략 ...")
+            continue
         code = int.from_bytes(ev[0:4], "big")
         name = EVENT_NAMES.get(code, "알 수 없는 Event Code")
-        out.append(f"  [Event] 0x{code:08x} {name}")
+        prefix = f"  [{i + 1:>4}]" if event_count > 1 else "  [Event]"
+        out.append(f"{prefix} 0x{code:08x} {name}")
         out.append(f"          OpMode=0x{ev[4]:02x} Module={ev[6]} Reader={ev[7]} "
                    f"DoorStatus={DOOR_STATUS_NAMES.get(ev[8], ev[8])} Func=0x{ev[9]:02x}")
         out.append(f"          시각=20{bcd(ev[10]):02d}-{bcd(ev[11]):02d}-{bcd(ev[12]):02d} "
-                   f"{bcd(ev[13]):02d}:{bcd(ev[14]):02d}:{bcd(ev[15]):02d}")
-        out.append(f"          AccessID={ev[16:24].hex().upper()}")
-    else:
-        out.append("  [Event] 없음 (대기 중인 이벤트가 없음)")
+                   f"{bcd(ev[13]):02d}:{bcd(ev[14]):02d}:{bcd(ev[15]):02d}"
+                   f"  AccessID={ev[16:24].hex().upper()}")
 
     return out
 

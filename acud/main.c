@@ -17,6 +17,7 @@
 #include "hal.h"
 #include "config.h"
 #include "loop.h"
+#include "events.h"
 #include "net.h"
 #include "discover.h"
 #include "protocol.h"
@@ -90,6 +91,30 @@ typedef struct {
     AcuDiscover      *disc;
     const AcuConfig  *cfg;
 } AcuRuntime;
+
+/*
+ * events.db 경로를 정한다. 설정이 비어 있으면 **db_path 옆에** 둔다 —
+ * 두 DB를 따로 백업·이관하는 일이 없게 같은 디렉터리에 두는 편이 운용에 낫다.
+ */
+static void resolve_events_path(char *out, size_t out_len, const AcuConfig *cfg)
+{
+    if (cfg->events_db_path[0] != '\0')
+    {
+        snprintf(out, out_len, "%s", cfg->events_db_path);
+        return;
+    }
+
+    const char *slash = strrchr(cfg->db_path, '/');
+    if (slash)
+    {
+        int dir_len = (int)(slash - cfg->db_path);
+        snprintf(out, out_len, "%.*s/events.db", dir_len, cfg->db_path);
+    }
+    else
+    {
+        snprintf(out, out_len, "events.db");
+    }
+}
 
 /* UDP 탐색 소켓이 읽을 수 있을 때 */
 static void on_discover_readable(int fd, unsigned events, void *user)
@@ -313,11 +338,20 @@ int main(int argc, char **argv)
     }
     db_seed_dummy_data(db);
 
+    /*
+     * 이벤트 저장소. DB를 못 열어도 NULL을 돌려주지 않고 메모리 전용 모드로 돈다
+     * (저장은 못 해도 출입 판정과 상위 보고는 계속돼야 한다 - events.h 머리말).
+     */
+    char events_path[300];
+    resolve_events_path(events_path, sizeof(events_path), &cfg);
+    AcuEvents *events = events_open(events_path, cfg.events_capacity);
+
     AcuNet *net = net_init(cfg.tcp_port); /* 실패해도 net=NULL로 계속 진행 (출입 판정은 네트워크 없이도 동작) */
 
     net_set_inactivity_timeout(net, cfg.inactivity_seconds);
     net_set_device_identity(net, cfg.device_category, cfg.device_type);
     net_set_time_sync(net, cfg.time_sync_enabled);
+    net_set_event_store(net, events, cfg.events_batch_size);
     apply_module_layout(net, &cfg);
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
@@ -333,6 +367,7 @@ int main(int argc, char **argv)
         log_msg("이벤트 루프 생성 실패 -> 종료");
         discover_shutdown(disc);
         net_shutdown(net);
+        events_close(events);
         db_close(db);
         hal_shutdown();
         remove(pid_path);
@@ -431,6 +466,7 @@ int main(int argc, char **argv)
                         net_set_inactivity_timeout(net, new_cfg.inactivity_seconds);
                         net_set_device_identity(net, new_cfg.device_category, new_cfg.device_type);
                         net_set_time_sync(net, new_cfg.time_sync_enabled);
+                        net_set_event_store(net, events, new_cfg.events_batch_size);
                         apply_module_layout(net, &new_cfg);
                         net_attach_loop(net, loop);
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");
@@ -447,8 +483,13 @@ int main(int argc, char **argv)
                 net_set_inactivity_timeout(net, cfg.inactivity_seconds);
                 net_set_device_identity(net, cfg.device_category, cfg.device_type);
                 net_set_time_sync(net, cfg.time_sync_enabled);
+                net_set_event_store(net, events, cfg.events_batch_size);
                 apply_module_layout(net, &cfg);
-                log_msg("설정 리로드 완료");
+                /*
+                 * events_db_path·events_capacity는 재시작해야 반영된다 - 돌고 있는 저장소를
+                 * 바꾸면 아직 안 올라간 이벤트의 전송 위치가 어긋난다. 묶음 크기만 바로 반영한다.
+                 */
+                log_msg("설정 리로드 완료 (이벤트 저장 경로·한도는 재시작 후 반영)");
             }
             else
             {
@@ -477,6 +518,7 @@ int main(int argc, char **argv)
     loop_destroy(loop);
     discover_shutdown(disc);
     net_shutdown(net);
+    events_close(events); /* net보다 뒤에 - net이 응답을 만들다 말고 저장소를 볼 수 있다 */
     db_close(db);
     hal_shutdown();
     remove(pid_path);

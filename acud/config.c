@@ -40,6 +40,17 @@
 #define ACU_DEFAULT_MODULE_TYPE IDTI_MODULE_TYPE_SSC_324
 #define ACU_INACTIVITY_MAX 65535  /* 프레임의 2byte 필드 한계 */
 
+/*
+ * 이벤트 저장. 기본 경로는 빈 문자열 = "db_path 옆에 events.db" (main이 만든다).
+ * 1,000만 건은 36byte 이벤트 기준 SQLite 오버헤드까지 대략 1GB 안쪽이다.
+ * 묶음 200건은 DM 권고 구간(200~500)의 아래쪽 — 폴링 3초면 분당 4,000건이다.
+ */
+#define ACU_DEFAULT_EVENTS_DB_PATH ""
+#define ACU_DEFAULT_EVENTS_CAPACITY 10000000LL
+#define ACU_DEFAULT_EVENTS_BATCH 200
+#define ACU_EVENTS_BATCH_MAX 500
+#define ACU_EVENTS_CAPACITY_MIN 1000LL
+
 void config_set_defaults(AcuConfig *cfg)
 {
     snprintf(cfg->db_path, sizeof(cfg->db_path), "%s", ACU_DEFAULT_DB_PATH);
@@ -64,6 +75,9 @@ void config_set_defaults(AcuConfig *cfg)
     cfg->module_alarm_fire_inputs = IDTI_MODULE_DEFAULT_ALARM_FIRE_INPUTS;
     cfg->module_type = ACU_DEFAULT_MODULE_TYPE;
     cfg->module_install_type = ACU_DEFAULT_MODULE_INSTALL_TYPE;
+    snprintf(cfg->events_db_path, sizeof(cfg->events_db_path), "%s", ACU_DEFAULT_EVENTS_DB_PATH);
+    cfg->events_capacity = ACU_DEFAULT_EVENTS_CAPACITY;
+    cfg->events_batch_size = ACU_DEFAULT_EVENTS_BATCH;
 }
 
 /*
@@ -271,6 +285,34 @@ int config_load(const char *path, AcuConfig *cfg)
     cfg->module_alarm_fire_inputs =
         read_int_field(root, "module_alarm_fire_inputs", 0, IDTI_MODULE_IO_SLOTS,
                        IDTI_MODULE_DEFAULT_ALARM_FIRE_INPUTS);
+    /* 이벤트 저장. 경로는 빈 문자열 자체가 "db_path 옆에 둔다"는 유효한 값이다 */
+    const cJSON *events_db_path = cJSON_GetObjectItemCaseSensitive(root, "events_db_path");
+    if (cJSON_IsString(events_db_path))
+    {
+        snprintf(cfg->events_db_path, sizeof(cfg->events_db_path), "%s", events_db_path->valuestring);
+    }
+    else
+    {
+        snprintf(cfg->events_db_path, sizeof(cfg->events_db_path), "%s", ACU_DEFAULT_EVENTS_DB_PATH);
+    }
+
+    const cJSON *events_capacity = cJSON_GetObjectItemCaseSensitive(root, "events_capacity");
+    if (cJSON_IsNumber(events_capacity) && events_capacity->valuedouble >= ACU_EVENTS_CAPACITY_MIN)
+    {
+        cfg->events_capacity = (long long)events_capacity->valuedouble;
+    }
+    else
+    {
+        if (events_capacity)
+        {
+            log_msg("config.json: events_capacity가 너무 작거나 잘못됨 - 기본값 사용");
+        }
+        cfg->events_capacity = ACU_DEFAULT_EVENTS_CAPACITY;
+    }
+
+    cfg->events_batch_size = read_int_field(root, "events_batch_size", 1, ACU_EVENTS_BATCH_MAX,
+                                            ACU_DEFAULT_EVENTS_BATCH);
+
     cfg->module_type = read_int_field(root, "module_type", 0, 255, ACU_DEFAULT_MODULE_TYPE);
     cfg->module_install_type =
         read_int_field(root, "module_install_type", 0, 2, ACU_DEFAULT_MODULE_INSTALL_TYPE);

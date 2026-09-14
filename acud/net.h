@@ -3,6 +3,7 @@
 
 #include "access.h"
 #include "loop.h"
+#include "events.h"
 
 /*
  * 네트워크 통신부 (5단계, IDTi 프로토콜 V2, TCP 전용).
@@ -46,6 +47,15 @@ void net_shutdown(AcuNet *net);
  * 반환: 0=성공, -1=실패. net_shutdown()이 등록을 해제한다.
  */
 int net_attach_loop(AcuNet *net, AcuLoop *loop);
+
+/*
+ * 이벤트 저장소를 붙인다 (events.h). 이것이 없으면 이벤트를 보고하지 못한다 —
+ * 출입 판정 자체는 계속 동작한다.
+ * batch_size: 한 응답에 실을 최대 건수. 0이면 기본값(200), 상한 500 —
+ *   DM은 이벤트 1건마다 INSERT + 정책 검사를 폴링 스레드에서 순차로 해서 한 번에 많으면
+ *   다른 장비 폴링이 밀린다 (2026-09-11 DM 회신 4-6의 권고 구간).
+ */
+void net_set_event_store(AcuNet *net, AcuEvents *store, int batch_size);
 
 /*
  * 유휴 타임아웃을 검사해 필요하면 연결을 닫는다.

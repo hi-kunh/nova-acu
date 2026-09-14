@@ -7,7 +7,17 @@
  * 데몬을 재시작하지 않고도 새 설정을 반영한다.
  */
 typedef struct {
-    char db_path[256];       /* SQLite3 DB 파일 경로 */
+    char db_path[256];       /* SQLite3 DB 파일 경로 (카드·유효기간·시간대) */
+
+    /*
+     * 이벤트 영속 저장 (events.h). 사용자 DB와 파일을 나눈다 —
+     * 사용자 DB는 수십만 건을 통째로 교체하는 쓰기, 이벤트는 한 건씩 계속 붙는 쓰기라
+     * 성격이 다르고, 이벤트 링 삭제가 사용자 DB 쪽을 붙잡으면 안 된다.
+     */
+    char events_db_path[256]; /* 빈 문자열이면 db_path 옆에 events.db */
+    long long events_capacity; /* 보관 최대 건수. 넘으면 오래된 것부터 지운다 */
+    int  events_batch_size;   /* 한 응답에 실을 최대 이벤트 수 (DM 권고 200~500) */
+
     int  door_open_seconds;  /* 도어 릴레이 동작 시간(초). IDTi Relay ActiveTime(1~99) 대응 */
     char admin_password[5];  /* 단말기(관리자) 비밀번호, 숫자 4자리 문자열. 웹 설정 화면 로그인에 사용.
                                * IDTi Header의 Password(4byte)/User Info의 Password(2byte BCD) 개념과

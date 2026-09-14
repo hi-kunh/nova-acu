@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -O2
 LDLIBS  = -lsqlite3 -lcjson
 TARGET  = acud
-SRC     = main.c log.c db.c access.c hal_mock.c config.c protocol.c loop.c net.c discover.c
+SRC     = main.c log.c db.c events.c access.c hal_mock.c config.c protocol.c loop.c net.c discover.c
 
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDLIBS)
@@ -10,7 +10,12 @@ $(TARGET): $(SRC)
 run: $(TARGET)
 	./$(TARGET)
 
-clean:
-	rm -f $(TARGET)
+# events.db 성능·링 삭제 시험 도구 (tools/events_bench.c)
+bench: events_bench
+events_bench: ../tools/events_bench.c events.c log.c
+	$(CC) $(CFLAGS) -o events_bench ../tools/events_bench.c events.c log.c -lsqlite3
 
-.PHONY: run clean
+clean:
+	rm -f $(TARGET) events_bench
+
+.PHONY: run bench clean
