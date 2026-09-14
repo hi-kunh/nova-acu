@@ -91,6 +91,22 @@ void net_check_inactivity(AcuNet *net);
 void net_push_event(AcuNet *net, AccessResult result, const uint8_t *access_id, int door_status,
                     int module_addr, int reader_addr);
 
+/*
+ * 카드 판정이 아닌 **장비 이벤트**를 올린다 (화재·알람·강제 개방·USB 단절).
+ * Access ID 자리는 비운다 — 규약상 그 자리는 User/Card ID다.
+ * module_addr / reader_addr 규칙은 HARDWARE.md "이벤트 주소" 절.
+ */
+void net_push_system_event(AcuNet *net, uint32_t event_code, int module_addr, int reader_addr);
+
+/* 지금 강제 개방 상태인지 (Object 206). net이 NULL이면 0 */
+int net_force_open_state(const AcuNet *net);
+
+/*
+ * 강제 개방 상태가 **바뀔 때** 부를 함수를 등록한다.
+ * net은 상태와 DM 보고만 맡고, 실제 릴레이 동작은 이 콜백(main -> HAL)이 한다.
+ */
+void net_set_force_open_handler(AcuNet *net, void (*cb)(int on, void *user), void *user);
+
 /* 상위 시스템이 지금 붙어 있는지 (netmodule IMIN의 Connect 필드에 실린다). net이 NULL이면 0 */
 int net_is_connected(const AcuNet *net);
 

@@ -64,6 +64,14 @@ EVENT_NAMES = {
     0x101D0101: "User File Register Success (일부 사용자 미등록)",
     0x101D0102: "User File Register All Success (전부 등록)",
     0x101D0103: "User File Register All Fail (전부 실패)",
+    # 장비 자체 이벤트 (dm/event_codes_all.csv)
+    0x18010119: "Door Forced Open Mode (강제 개방 켜짐)",
+    0x1801011A: "Door Normal Mode (강제 개방 꺼짐)",
+    0x18010306: "EX Sensor Motion Detected (알람 동작)",
+    0x18010307: "EX Sensor Motion Restored (알람 복구)",
+    0x18010401: "EM Sensor Fire Detected (화재 동작)",
+    0x18010402: "EM Sensor Fire Restored (화재 복구)",
+    0x20030102: "H/W No Response (RRU USB 단절)",
 }
 
 DOOR_STATUS_NAMES = {0x00: "None", 0x01: "Open(Not Closed)", 0x02: "Closed"}
@@ -460,7 +468,8 @@ def main():
     ap.add_argument("--port", type=int, default=9870, help="ACU 포트 (기본 9870)")
     ap.add_argument("--request",
                     choices=["history", "status", "lcd-check", "lcd-change", "lang-check", "lang-change",
-                             "userbin", "userbin-recv"],
+                             "userbin", "userbin-recv",
+                             "force-open", "force-normal", "force-check"],
                     default="history",
                     help="history=이벤트 로그 조회(기본), "
                          "status=장치 상태 요청(RequestStatus/Read/Firmware — PC가 접속 후 보내는 첫 명령)")
@@ -480,6 +489,7 @@ def main():
 
     # LCD 명령 4종의 Command/Sub/Object (근거: isldev/clsDevCommand.cs). 우리 장비에는 LCD가 없다
     OBJ_LCD_CONTROL, OBJ_MULTI_LANGUAGE = 0x31, 0xA5
+    OBJ_FORCE_OPEN = 0xCE   # 13. Force OpenMode
     CMD_SND_STATUS, CMD_SND_DATA, SUBCMD_CHANGE = 0x03, 0x05, 0x05
     data = b""
     if args.request == "history":
@@ -492,6 +502,13 @@ def main():
     elif args.request == "lcd-change":
         command, sub, obj = CMD_SND_DATA, SUBCMD_CHANGE, OBJ_LCD_CONTROL
         data = bytes(40)  # LCD 설정 블록 크기만큼 채워 보낸다
+    elif args.request == "force-open" or args.request == "force-normal":
+        # 13. Force OpenMode: 설정은 Cmd 3 / Sub 5 / Obj 0xCE, Data(1)
+        #   0x01 = 개방, 그 밖의 값 = 복구
+        command, sub, obj = CMD_SND_STATUS, SUBCMD_CHANGE, OBJ_FORCE_OPEN
+        data = bytes([0x01 if args.request == "force-open" else 0x00])
+    elif args.request == "force-check":
+        command, sub, obj = CMD_REQ_DATA, SUBCMD_READ, OBJ_FORCE_OPEN
     elif args.request == "lang-check":
         command, sub, obj = CMD_REQ_DATA, SUBCMD_READ, OBJ_MULTI_LANGUAGE
     else:  # lang-change

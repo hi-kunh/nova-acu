@@ -25,6 +25,9 @@
  * 기본 동작은 "아무 일도 일어나지 않음"이고, 테스트 입력은 FIFO(named pipe)로 주입한다.
  *   echo 04A1B2C3D4E5F600 > acud_mock.fifo   # 카드 태그 1회
  *   echo "door open"      > acud_mock.fifo   # 도어 접점 = 열림
+ *   echo "alarm on"       > acud_mock.fifo   # 알람 입력 동작 ("alarm off" 로 복구)
+ *   echo "fire on"        > acud_mock.fifo   # 화재 입력 동작 ("fire off" 로 복구)
+ *   echo "rru down 1"     > acud_mock.fifo   # RRU 1 단절 흉내 (DM에 H/W No Response)
  *   echo "auto on"        > acud_mock.fifo   # 더미 카드 자동 순회(예전 동작) 켜기
  *
  * 예전에는 hal_read_card()가 호출될 때마다(당시 2초 주기) 무조건 더미 카드를 태그한 것처럼 굴었는데,
@@ -67,6 +70,14 @@ static size_t g_line_len = 0;
 
 static int g_door_active = 0; /* 1이면 도어 접점 활성(=문 열림) */
 static int g_exit_active = 0; /* 1이면 Exit 버튼 눌림 */
+/* 끊긴 것으로 보고할 RRU 번호 대기열 (mock 전용) */
+#define MOCK_DOWN_CAP 8
+static int g_down[MOCK_DOWN_CAP];
+static int g_down_head = 0;
+static int g_down_count = 0;
+
+static int g_alarm_active = 0; /* 알람 입력 */
+static int g_fire_active = 0;  /* 화재 입력 */
 
 /*
  * 주입된 카드 대기 큐.
@@ -164,6 +175,36 @@ static int handle_command(const char *line)
         g_exit_active = (strcmp(line, "exit on") == 0);
         snprintf(msg, sizeof(msg), "HAL(mock): Exit 버튼 = %s (main 루프는 아직 Exit 버튼을 처리하지 않음)",
                  g_exit_active ? "눌림" : "안눌림");
+        log_msg(msg);
+        return 1;
+    }
+    if (strncmp(line, "rru down ", 9) == 0)
+    {
+        int rru = atoi(line + 9);
+        if (rru >= 1 && rru <= HAL_RRU_MAX && g_down_count < MOCK_DOWN_CAP)
+        {
+            g_down[(g_down_head + g_down_count) % MOCK_DOWN_CAP] = rru;
+            g_down_count++;
+            snprintf(msg, sizeof(msg), "HAL(mock): RRU %d 단절을 흉내 낸다", rru);
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg), "HAL(mock): RRU 번호 %d 는 1~%d 범위가 아니다", rru, HAL_RRU_MAX);
+        }
+        log_msg(msg);
+        return 1;
+    }
+    if (strcmp(line, "alarm on") == 0 || strcmp(line, "alarm off") == 0)
+    {
+        g_alarm_active = (strcmp(line, "alarm on") == 0);
+        snprintf(msg, sizeof(msg), "HAL(mock): 알람 입력 = %s", g_alarm_active ? "동작" : "복구");
+        log_msg(msg);
+        return 1;
+    }
+    if (strcmp(line, "fire on") == 0 || strcmp(line, "fire off") == 0)
+    {
+        g_fire_active = (strcmp(line, "fire on") == 0);
+        snprintf(msg, sizeof(msg), "HAL(mock): 화재 입력 = %s", g_fire_active ? "동작" : "복구");
         log_msg(msg);
         return 1;
     }
@@ -374,12 +415,45 @@ int hal_open_door(int seconds)
     return 0;
 }
 
+int hal_take_disconnected_rru(void)
+{
+    if (g_down_count == 0)
+    {
+        return 0;
+    }
+    int rru = g_down[g_down_head];
+    g_down_head = (g_down_head + 1) % MOCK_DOWN_CAP;
+    g_down_count--;
+    return rru;
+}
+
+int hal_set_force_open(int on)
+{
+    char line[96];
+    snprintf(line, sizeof(line), "HAL(mock): 강제 개방 = %s (도어 릴레이를 계속 %s)",
+             on ? "켬" : "끔", on ? "켠다" : "끈다");
+    log_msg(line);
+    return 0;
+}
+
+int hal_set_alarm_relays(int on)
+{
+    char line[140];
+    snprintf(line, sizeof(line),
+             "HAL(mock): 알람 릴레이 %s (동작 종류 Alarm인 출력 전부 - mock은 전부로 흉내)",
+             on ? "켬" : "끔");
+    log_msg(line);
+    return 0;
+}
+
 int hal_read_sensor(HalSensorId id)
 {
     switch (id)
     {
         case HAL_SENSOR_DOOR_CONTACT: return g_door_active ? HAL_SENSOR_ACTIVE : HAL_SENSOR_INACTIVE;
         case HAL_SENSOR_EXIT_BUTTON:  return g_exit_active ? HAL_SENSOR_ACTIVE : HAL_SENSOR_INACTIVE;
+        case HAL_SENSOR_ALARM_INPUT:  return g_alarm_active ? HAL_SENSOR_ACTIVE : HAL_SENSOR_INACTIVE;
+        case HAL_SENSOR_FIRE_INPUT:   return g_fire_active ? HAL_SENSOR_ACTIVE : HAL_SENSOR_INACTIVE;
         default:                      return -1;
     }
 }

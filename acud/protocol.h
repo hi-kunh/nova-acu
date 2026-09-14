@@ -95,6 +95,34 @@
  * DM이 "명단이 장비에 실제로 들어갔는가"를 아는 유일한 표식이다
  * (9/11 회신의 "DB 설정 ≠ 장비 설정" 문제와 같은 맥락).
  */
+/*
+ * 장비 자체 이벤트 (`dm/event_codes_all.csv` 확인값, 2026-09-11 Platinum 회신으로 용도 확정).
+ * ⚠ **새 코드를 만들 수 없다** — 기존 IDTi 장비를 대체하는 것이라 DM·Platinum이 아는 코드만 쓴다.
+ */
+#define IDTI_EVENT_DOOR_FORCED_OPEN 0x18010119u /* Door Forced Open Mode */
+#define IDTI_EVENT_DOOR_NORMAL      0x1801011Au /* Door Normal Mode */
+#define IDTI_EVENT_ALARM_DETECTED   0x18010306u /* EX Sensor Motion Detected — 용도가 알람이면 이 코드 */
+#define IDTI_EVENT_ALARM_RESTORED   0x18010307u /* EX Sensor Motion Restored */
+#define IDTI_EVENT_FIRE_DETECTED    0x18010401u /* EM Sensor Fire Detected */
+#define IDTI_EVENT_FIRE_RESTORED    0x18010402u /* EM Sensor Fire Restored */
+#define IDTI_EVENT_HW_NO_RESPONSE   0x20030102u /* H/W No Response — RRU USB 단절 */
+
+/*
+ * 이벤트 주소 규칙 (2026-09-11 DM 회신, HARDWARE.md "이벤트 주소").
+ * DM은 byte 6·7을 가공 없이 화면에 쓰므로 여기서 정확히 채워야 한다.
+ */
+#define IDTI_EVENT_ADDR_ALARM_READER 13 /* 알람 이벤트의 Reader 자리 (실측 0x01 0x0D) */
+#define IDTI_EVENT_ADDR_NONE          0 /* 반응 장치가 리더가 아니거나 미설정일 때 */
+
+/*
+ * 강제 개방 (`13. IDTi Protocol Force OpenMode.doc`), Object 0xCE(206).
+ *   설정  Cmd 0x03 SendStatus / Sub 0x05 Change / Obj 0xCE, Data(1) -> Result(1)
+ *   조회  Cmd 0x06 RequestData / Sub 0x02 Read  / Obj 0xCE        -> Data(1)
+ * Data는 **0x01이면 개방, 그 밖의 값이면 복구**다 (규약: "Open : 0x01  Recovery : Not 0x01").
+ */
+#define IDTI_OBJ_FORCE_OPEN 0xCE
+#define IDTI_FORCE_OPEN_ON  0x01
+
 #define IDTI_EVENT_USERFILE_PARTIAL 0x101D0101u /* 일부 사용자가 등록되지 않음 */
 #define IDTI_EVENT_USERFILE_SUCCESS 0x101D0102u /* 전부 등록 성공 */
 #define IDTI_EVENT_USERFILE_FAIL    0x101D0103u /* 전부 실패 */

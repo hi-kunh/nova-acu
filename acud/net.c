@@ -84,6 +84,14 @@ struct AcuNet {
     AcuUsers *users;
 
     /*
+     * 강제 개방 상태 (Object 206). DM이 켜고 끄며, 화재 정책도 DM이 이걸로 문을 연다.
+     * 실제 릴레이 동작은 main이 HAL로 한다 — net은 상태와 보고만 맡는다.
+     */
+    int force_open;
+    void (*on_force_open)(int on, void *user);
+    void *force_open_user;
+
+    /*
      * 붙어 있는 이벤트 루프. 리슨 fd와 클라이언트 fd를 여기에 등록한다.
      * 예전에는 net.c가 자기 select를 돌고 외부 fd를 하나만 얹을 수 있었는데(net_set_aux_reader),
      * 그 구조 때문에 카드 입력이 select에 들어가지 못했다 (loop.h 머리말 참고).
@@ -389,6 +397,59 @@ void net_set_users(AcuNet *net, AcuUsers *users)
     {
         net->users = users;
     }
+}
+
+void net_push_system_event(AcuNet *net, uint32_t event_code, int module_addr, int reader_addr)
+{
+    /*
+     * 카드 판정이 아닌 장비 이벤트(화재·알람·강제 개방·USB 단절).
+     * Access ID는 사람이 없으므로 비운다 — 규약상 그 자리는 User/Card ID다.
+     */
+    net_store_event(net, event_code, IDTI_OPMODE_NONE, NULL,
+                    net ? net->door_status : IDTI_DOOR_STATUS_NONE,
+                    module_addr, reader_addr);
+}
+
+int net_force_open_state(const AcuNet *net)
+{
+    return (net && net->force_open) ? 1 : 0;
+}
+
+void net_set_force_open_handler(AcuNet *net, void (*cb)(int on, void *user), void *user)
+{
+    if (net)
+    {
+        net->on_force_open = cb;
+        net->force_open_user = user;
+    }
+}
+
+/* 강제 개방 상태를 바꾼다 (DM 명령·화재 정책 어느 쪽에서 와도 여기를 지난다) */
+static void net_apply_force_open(AcuNet *net, int on)
+{
+    on = on ? 1 : 0;
+    if (net->force_open == on)
+    {
+        return; /* 같은 상태면 이벤트를 다시 올리지 않는다 */
+    }
+    net->force_open = on;
+
+    if (net->on_force_open)
+    {
+        net->on_force_open(on, net->force_open_user);
+    }
+
+    /*
+     * 상태가 바뀐 것을 DM에 알린다. 기존 장비도 이 두 코드를 올린다
+     * (2026-09-11 DM 실측: 화재 -> 3~7초 -> 18010119, 복구 -> 4~6초 -> 1801011a).
+     * 컨트롤러 전체 동작이라 주소는 첫 모듈·리더 없음으로 둔다.
+     */
+    net_push_system_event(net,
+                          on ? IDTI_EVENT_DOOR_FORCED_OPEN : IDTI_EVENT_DOOR_NORMAL,
+                          IDTI_EVENT_ADDR_FIRST_MODULE, IDTI_EVENT_ADDR_NONE);
+
+    log_msg(on ? "네트워크: 강제 개방 켜짐 - 문을 계속 열어 둔다"
+               : "네트워크: 강제 개방 꺼짐 - 정상 동작으로 돌아간다");
 }
 
 void net_set_event_store(AcuNet *net, AcuEvents *store, int batch_size)
@@ -1084,6 +1145,51 @@ static int handle_usercmd_request(AcuNet *net, const IdtiHeader *hdr, const uint
     return 1;
 }
 
+/*
+ * 강제 개방 (`13.` 문서), Object 0xCE(206). 처리했으면 1.
+ *   설정  Cmd 3 / Sub 5, Data(1): **0x01이면 개방, 그 밖이면 복구** -> Result(1)
+ *   조회  Cmd 6 / Sub 2                                            -> Data(1) 현재 값
+ */
+static int handle_force_open_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
+{
+    if (hdr->object != IDTI_OBJ_FORCE_OPEN)
+    {
+        return 0;
+    }
+
+    if (hdr->command == IDTI_CMD_SND_STATUS && hdr->sub_command == IDTI_SUBCMD_CHANGE)
+    {
+        const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;
+        int on = (hdr->data_len >= 1 && data[0] == IDTI_FORCE_OPEN_ON) ? 1 : 0;
+
+        net_apply_force_open(net, on);
+
+        uint8_t ack = IDTI_ACK_SUCCESS;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+
+        char line[120];
+        snprintf(line, sizeof(line), "네트워크: 강제 개방 명령 %s -> Success", on ? "개방" : "복구");
+        log_msg(line);
+        return 1;
+    }
+
+    if (hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ)
+    {
+        /* 규약: 개방이면 0x01, 복구면 0x01이 아닌 값 */
+        uint8_t value = net->force_open ? IDTI_FORCE_OPEN_ON : 0x00;
+        send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, hdr->object,
+                      &value, 1, 1, 1, 1, 1);
+
+        char line[120];
+        snprintf(line, sizeof(line), "네트워크: 강제 개방 조회 -> %s",
+                 net->force_open ? "개방(0x01)" : "복구(0x00)");
+        log_msg(line);
+        return 1;
+    }
+
+    return 0;
+}
+
 static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
     /*
@@ -1115,6 +1221,11 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pk
     }
 
     if (handle_usercmd_request(net, hdr, pkt))
+    {
+        return;
+    }
+
+    if (handle_force_open_request(net, hdr, pkt))
     {
         return;
     }

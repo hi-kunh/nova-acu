@@ -93,7 +93,90 @@ typedef struct {
     AcuNet           *net;
     AcuDiscover      *disc;
     const AcuConfig  *cfg;
+
+    /* 알람·화재 입력의 **직전 상태**. 변화할 때만 이벤트를 올리기 위해 들고 있는다 */
+    int alarm_active;
+    int fire_active;
 } AcuRuntime;
+
+/*
+ * 강제 개방 상태가 바뀌면 net이 부른다 (DM Object 206 명령, 화재 정책).
+ * net은 상태·DM 보고만 맡고 실제 릴레이는 여기서 HAL로 움직인다.
+ */
+static void on_force_open_changed(int on, void *user)
+{
+    (void)user;
+    hal_set_force_open(on);
+}
+
+static int module_addr_for_rru(int rru); /* 정의는 아래 */
+
+/*
+ * RRU 링크가 끊겼을 때 DM에 올린다.
+ *
+ * **새 코드를 만들 수 없다** — 기존 IDTi 장비 대체라 DM·Platinum이 아는 코드에서 골랐다.
+ * `0x20030102` H/W No Response (2026-09-11 Platinum 회신으로 확정).
+ * `0x20010102` Comm Halted는 **금지** — DM이 ACU의 TCP 단절에 쓰는 코드다.
+ *
+ * 주소는 **그 RRU의 첫 모듈, Reader 0** (RRU 단위로 1건 — DM 회신 권고).
+ * **복구는 올리지 않는다** (기존 장비가 그렇다).
+ *
+ * ⚠ 지금은 부르는 곳이 없다. 6단계에서 `PING` 3회 실패(약 6초)나 USB 노드가 사라졌을 때
+ * 부른다 — 설계는 `rru/ACU_RRU_USB_프로토콜_설계_초안.md` 6절.
+ */
+static void report_rru_disconnected(AcuRuntime *rt, int rru)
+{
+    char line[120];
+    snprintf(line, sizeof(line), "RRU %d 단절 -> DM에 H/W No Response 보고", rru);
+    log_msg(line);
+
+    net_push_system_event(rt->net, IDTI_EVENT_HW_NO_RESPONSE,
+                          module_addr_for_rru(rru), IDTI_EVENT_ADDR_NONE);
+}
+
+/*
+ * 알람·화재 입력이 바뀌었는지 보고, 바뀌었으면 DM에 이벤트를 올린다.
+ *
+ * 주소 규칙 (2026-09-11 DM 회신, HARDWARE.md "이벤트 주소"):
+ *   알람  Module = 모듈, Reader = 13   (실측 `01 0D`)
+ *   화재  반응 장치가 리더면 그 (모듈, 리더), 아니면 (0, 0)
+ *         -> 입력 설정(Object 44)을 아직 받지 않으므로 지금은 `(0, 0)`
+ *
+ * 알람 릴레이는 **ACU가 구동한다** — RRU는 릴레이를 스스로 움직이지 않는다.
+ * 어느 출력이 Alarm인지는 출력 설정(Object 45)을 받아야 알 수 있어, 지금은 mock이 흉내만 낸다.
+ */
+static void check_alarm_fire(AcuRuntime *rt)
+{
+    int alarm = (hal_read_sensor(HAL_SENSOR_ALARM_INPUT) == HAL_SENSOR_ACTIVE) ? 1 : 0;
+    int fire = (hal_read_sensor(HAL_SENSOR_FIRE_INPUT) == HAL_SENSOR_ACTIVE) ? 1 : 0;
+
+    if (alarm != rt->alarm_active)
+    {
+        rt->alarm_active = alarm;
+        net_push_system_event(rt->net,
+                              alarm ? IDTI_EVENT_ALARM_DETECTED : IDTI_EVENT_ALARM_RESTORED,
+                              IDTI_EVENT_ADDR_FIRST_MODULE, IDTI_EVENT_ADDR_ALARM_READER);
+        hal_set_alarm_relays(alarm);
+        log_msg(alarm ? "알람 입력 동작 -> DM 보고 + 알람 릴레이 켬"
+                      : "알람 입력 복구 -> DM 보고 + 알람 릴레이 끔");
+    }
+
+    if (fire != rt->fire_active)
+    {
+        rt->fire_active = fire;
+        net_push_system_event(rt->net,
+                              fire ? IDTI_EVENT_FIRE_DETECTED : IDTI_EVENT_FIRE_RESTORED,
+                              IDTI_EVENT_ADDR_NONE, IDTI_EVENT_ADDR_NONE);
+        hal_set_alarm_relays(fire);
+        /*
+         * ⚠ **문을 여는 것은 우리가 하지 않는다.** 화재 시 전체 개방은 **DM 정책**이 처리하고,
+         * DM이 강제 개방(Object 206) 명령을 내려보낸다 (2026-09-11 실측 4회 확인).
+         * 우리는 이벤트만 올린다 — 여기서 문을 같이 열면 DM 정책과 이중으로 동작한다.
+         */
+        log_msg(fire ? "화재 입력 동작 -> DM 보고 (문 개방은 DM 정책이 명령한다)"
+                     : "화재 입력 복구 -> DM 보고");
+    }
+}
 
 /*
  * db_path가 있는 디렉터리에 name 파일을 둔다.
@@ -201,6 +284,16 @@ static void on_card_readable(int fd, unsigned events, void *user)
 
     int door_status = read_door_status();
     net_set_door_status(rt->net, door_status);
+
+    /* 알람·화재도 같은 입력으로 들어온다 (mock은 FIFO, 6단계에서는 RRU 프레임) */
+    check_alarm_fire(rt);
+
+    /* 링크가 끊긴 RRU가 보고됐으면 DM에 올린다 (mock은 FIFO의 "rru down N") */
+    int down_rru;
+    while ((down_rru = hal_take_disconnected_rru()) > 0)
+    {
+        report_rru_disconnected(rt, down_rru);
+    }
 
     for (;;)
     {
@@ -454,7 +547,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    AcuRuntime rt = { db, users, net, disc, &cfg };
+    AcuRuntime rt = { db, users, net, disc, &cfg, 0, 0 };
+
+    /* 강제 개방은 net이 상태를 들고, 실제 릴레이는 rt를 통해 HAL로 나간다 */
+    net_set_force_open_handler(net, on_force_open_changed, &rt);
 
     if (net)
     {
@@ -548,6 +644,7 @@ int main(int argc, char **argv)
                         net_set_event_store(net, events, new_cfg.events_batch_size);
                         net_set_userbin(net, userbin);
                         net_set_users(net, users);
+                        net_set_force_open_handler(net, on_force_open_changed, &rt);
                         apply_module_layout(net, &new_cfg);
                         net_attach_loop(net, loop);
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");

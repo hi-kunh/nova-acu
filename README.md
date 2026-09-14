@@ -1873,6 +1873,77 @@ User Info·이름·카드·Restriction·그룹·CRC가 모두 그대로 돌아�
 
 기존 시험도 회귀 없이 통과: `userbin_test.py`(5) · `usercmd_test.py`(4) · `users_test`(22).
 
+### 2026-09-14 (월, 마지막) — DM 명령·이벤트 (9/17 예정분)
+
+#### 강제 개방 — Object `0xCE`(206)
+
+`13. IDTi Protocol Force OpenMode.doc`.
+
+```
+설정  Cmd 3 SendStatus / Sub 5 Change / Obj 0xCE   Data(1) -> Result(1)
+조회  Cmd 6 RequestData / Sub 2 Read  / Obj 0xCE           -> Data(1)
+```
+
+- Data는 **`0x01`이면 개방, 그 밖의 값이면 복구**다 (규약: *"Open : 0x01  Recovery : Not 0x01"*).
+  `0x00`만 복구로 보면 DM이 다른 값을 보낼 때 틀린다
+- 상태가 **바뀔 때만** DM에 알린다 — `0x18010119` Door Forced Open Mode / `0x1801011A` Door Normal Mode.
+  같은 상태를 다시 명령받아도 이벤트를 또 올리지 않는다
+- `net`은 **상태와 보고만** 맡고, 실제 릴레이는 `main`이 HAL로 움직인다(`hal_set_force_open`).
+  6단계에서는 RRU에 `OUTPUT` 명령으로 나간다
+
+오늘 아침 보드 로그에 `6/2/0xCE`(조회)가 4번 와 있었다 — **DM이 이미 물어보고 있던 명령**이다.
+
+#### 화재·알람 입력 → DM 이벤트
+
+| 입력 | 코드 | 이벤트 주소 |
+|------|------|------|
+| 알람 동작/복구 | `18010306` / `18010307` | Module = 모듈, **Reader = 13** (DM 실측 `01 0D`) |
+| 화재 동작/복구 | `18010401` / `18010402` | 반응 장치가 리더면 그 (모듈, 리더), 아니면 **`(0,0)`** |
+
+- 코드는 **용도가 정한다** — `18010306`은 표에 "Motion Detected"지만 입력 용도가 알람이면 알람 이벤트다
+  (2026-09-11 Platinum 회신). **새 코드를 만들 수 없다** — 기존 장비 대체이기 때문이다
+- 화재 주소는 입력 설정(Object 44)을 받아야 정확해진다 → 지금은 `(0,0)`
+- **알람 릴레이는 ACU가 구동한다** (RRU는 릴레이를 스스로 안 움직인다).
+  어느 출력이 Alarm인지는 출력 설정(Object 45)을 받아야 알아서, 지금은 mock이 "전부"로 흉내 낸다
+- ⚠ **화재 때 문을 여는 것은 우리가 하지 않는다.** 전체 개방은 **DM 정책**이 판단해
+  강제 개방(206) 명령을 내려보낸다 (2026-09-11 실측 4회). 여기서 같이 열면 이중으로 동작한다
+
+#### USB 단절 이벤트 골격
+
+`0x20030102` H/W No Response. 주소는 **그 RRU의 첫 모듈, Reader 0** (RRU 단위 1건),
+**복구는 올리지 않는다** (기존 장비가 그렇다).
+
+⚠ `0x20010102` Comm Halted는 **금지** — DM이 ACU의 TCP 단절에 쓰는 코드다.
+
+지금은 부르는 곳이 mock뿐이다. 6단계에서 `PING` 3회 실패나 USB 노드 사라짐이 `hal_take_disconnected_rru()`에
+쌓인다 (설계: `rru/ACU_RRU_USB_프로토콜_설계_초안.md` 6절).
+
+#### 확인 — 보드 + 실제 DM
+
+mock FIFO에 명령을 넣어 5건을 만들고, **실제 DM이 전부 가져간 것**을 확인했다
+(`보관 12건 / 전송 위치 12`).
+
+```
+seq=12  20030102  Module=5 Reader=0    <- RRU 3 단절 ((3-1)x2+1 = 모듈 5)
+seq=11  18010402  Module=0 Reader=0    <- 화재 복구
+seq=10  18010307  Module=1 Reader=13   <- 알람 복구
+seq= 9  18010401  Module=0 Reader=0    <- 화재 동작
+seq= 8  18010306  Module=1 Reader=13   <- 알람 동작
+```
+
+강제 개방도 개방 → 조회(`0x01`) → 복구 → 조회(`0x00`)가 모두 동작하고
+`18010119`/`1801011A` 이벤트가 올라갔다.
+
+mock 명령이 늘었다:
+
+```
+echo "alarm on"    > acud_mock.fifo    # "alarm off" 로 복구
+echo "fire on"     > acud_mock.fifo    # "fire off"  로 복구
+echo "rru down 3"  > acud_mock.fifo    # RRU 3 단절 흉내
+```
+
+`tools/idti_client.py --request force-open / force-normal / force-check` 로 강제 개방을 시험한다.
+
 ## 빌드 & 실행
 
 ```bash

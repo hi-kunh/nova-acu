@@ -27,6 +27,12 @@
 typedef enum {
     HAL_SENSOR_DOOR_CONTACT = 0, /* Door Contact (Device Type 0xac) */
     HAL_SENSOR_EXIT_BUTTON  = 1, /* Door Control/Exit Button (Device Type 0xae) */
+    /*
+     * 알람·화재는 **모듈마다 실제로 배선된 입력**이다 (SSC-324 실물: 모듈당 알람 1 · 화재 1).
+     * 지금은 보드 전체에 하나씩만 흉내 낸다 — 6단계에서 RRU가 모듈·채널까지 알려 준다.
+     */
+    HAL_SENSOR_ALARM_INPUT  = 2,
+    HAL_SENSOR_FIRE_INPUT   = 3,
 } HalSensorId;
 
 typedef enum {
@@ -71,6 +77,30 @@ int hal_read_card(int *out_rru, char *out_card_id, size_t out_len);
  * 반환: 0=성공, -1=실패
  */
 int hal_open_door(int seconds);
+
+/*
+ * **강제 개방** — 문을 계속 열어 둔다(on=1) 또는 원래대로 돌린다(on=0).
+ * 시간이 정해진 `hal_open_door()`와 달리 **상태**다. DM의 Object 206 명령과 화재 정책이 이걸 쓴다.
+ * 6단계에서는 RRU에 `OUTPUT`(끄기/켜기) 명령으로 나간다.
+ * 반환: 0=성공, -1=실패
+ */
+int hal_set_force_open(int on);
+
+/*
+ * **알람 릴레이** — 동작 종류가 Alarm인 출력 전부를 켜거나 끈다 (SSC-324 실측 동작).
+ * RRU는 릴레이를 스스로 움직이지 않으므로 **ACU가 판단해 명령한다**.
+ * ⚠ 어느 출력이 Alarm인지는 **출력 설정(Object 45)** 을 받아야 안다 — DM 원시 바이트 대기 중.
+ *   그때까지는 mock이 "전부"로 흉내 낸다.
+ * 반환: 0=성공, -1=실패
+ */
+int hal_set_alarm_relays(int on);
+
+/*
+ * 링크가 끊긴 RRU 번호를 하나 꺼낸다 (없으면 0).
+ * 6단계에서는 `PING` 3회 실패나 USB 노드 사라짐이 여기에 쌓인다.
+ * mock은 FIFO의 `rru down <번호>` 명령으로 흉내 낸다.
+ */
+int hal_take_disconnected_rru(void);
 
 /* 센서 상태를 읽는다. 반환: HalSensorState 값, 오류 시 -1 */
 int hal_read_sensor(HalSensorId id);
