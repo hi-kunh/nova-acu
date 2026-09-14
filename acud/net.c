@@ -44,6 +44,7 @@ _Static_assert(NET_RECV_BUF_CAP > 0xFFFF, "수신 버퍼가 프레임 최대 길
 
 #define NET_EVENT_DATA_CAP (NET_EVENT_BATCH_MAX * IDTI_EVENT_INFO_LEN) /* 18,000 */
 /* 응답 payload = 장치상태 + (이벤트 묶음 또는 Firmware Info) 중 큰 쪽 */
+/* 이벤트 묶음(18,000)과 명단 조각(14,464+2) 중 큰 쪽을 담아야 한다 */
 #define NET_PAYLOAD_CAP (IDTI_DEVICE_STATUS_V2_LEN + NET_EVENT_DATA_CAP)
 #define NET_RESP_BUF_CAP (NET_PAYLOAD_CAP + 128)  /* + 헤더 44 · 주소 · CS/ETX */
 #define NET_SEND_BUF_CAP (NET_RESP_BUF_CAP * 2)   /* 부분 전송분을 담아 둘 여유 */
@@ -835,6 +836,83 @@ static int handle_lcd_request(AcuNet *net, const IdtiHeader *hdr)
 }
 
 /*
+ * 읽기 방향 — DM이 우리 명단을 받아 간다 (`UserBinTransReceive`).
+ *   Start    Cmd 6 / Sub 2 / Obj 0xD0, Data(1)=Binary OBJ -> Data(10)
+ *   Continue Cmd 6 / Sub 2 / Obj 0xD1, Data(2)=조각 번호  -> Data(2+N)
+ * 처리했으면 1.
+ */
+static int handle_userbin_send(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt,
+                               int is_start)
+{
+    const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;
+    size_t data_len = hdr->data_len;
+
+    if (!net->userbin)
+    {
+        uint8_t ack = IDTI_ACK_FAIL;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        return 1;
+    }
+
+    if (is_start)
+    {
+        uint8_t binary_obj = (data_len >= 1) ? data[0] : IDTI_USERBIN_OBJ_INFO;
+        uint32_t total_size = 0, total_count = 0;
+
+        if (userbin_receive_start(net->userbin, binary_obj, &total_size, &total_count) != 0)
+        {
+            uint8_t ack = IDTI_ACK_FAIL;
+            send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object,
+                          &ack, 1, 1, 1, 1, 1);
+            return 1;
+        }
+
+        /* Data(10) = 총 크기(4) + 총 인원(4) + Binary OBJ(1) + Reserved(1) */
+        uint8_t body[10];
+        body[0] = (uint8_t)(total_size >> 24); body[1] = (uint8_t)(total_size >> 16);
+        body[2] = (uint8_t)(total_size >> 8);  body[3] = (uint8_t)total_size;
+        body[4] = (uint8_t)(total_count >> 24); body[5] = (uint8_t)(total_count >> 16);
+        body[6] = (uint8_t)(total_count >> 8);  body[7] = (uint8_t)total_count;
+        body[8] = binary_obj;
+        body[9] = 0x00;
+
+        send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, hdr->object,
+                      body, sizeof(body), 1, 1, 1, (uint16_t)sizeof(body));
+        return 1;
+    }
+
+    /* Continue — Data(2) = 조각 번호. 응답은 번호(2) + 명단 일부 */
+    if (data_len < 2)
+    {
+        uint8_t ack = IDTI_ACK_FAIL;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        return 1;
+    }
+
+    uint16_t index = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+
+    static uint8_t body[2 + USERBIN_SEND_CHUNK];
+    int n = userbin_receive_chunk(net->userbin, index, body + 2, USERBIN_SEND_CHUNK);
+    if (n < 0)
+    {
+        uint8_t ack = IDTI_ACK_FAIL;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        return 1;
+    }
+
+    body[0] = (uint8_t)(index >> 8);
+    body[1] = (uint8_t)index;
+
+    send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, hdr->object,
+                  body, (size_t)n + 2, 1, 1, 1, (uint16_t)(n + 2));
+
+    char line[140];
+    snprintf(line, sizeof(line), "네트워크: 사용자 바이너리 읽기 조각 %u -> %dbyte", index, n);
+    log_msg(line);
+    return 1;
+}
+
+/*
  * 사용자 바이너리 전송 수신 (`5.` 문서). Cmd 5 / Sub 3 / Obj 0xD0(Start)·0xD1(Continue).
  * 처리했으면 1, 우리 명령이 아니면 0.
  *
@@ -849,9 +927,15 @@ static int handle_userbin_request(AcuNet *net, const IdtiHeader *hdr, const uint
     {
         return 0;
     }
+    /* 읽기 방향 — DM이 우리 명단을 받아 간다 */
+    if (hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ)
+    {
+        return handle_userbin_send(net, hdr, pkt, is_start);
+    }
+
     if (hdr->command != IDTI_CMD_SND_DATA || hdr->sub_command != IDTI_SUBCMD_WRITE)
     {
-        return 0; /* 같은 오브젝트의 읽기 방향(PC가 우리 명단을 받아 가는 것)은 아직 미구현 */
+        return 0;
     }
 
     const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;

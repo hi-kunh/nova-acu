@@ -26,7 +26,22 @@ struct AcuUserBin {
 
     uint32_t parsed_ok;       /* 저장에 성공한 사용자 수 */
     uint32_t parsed_bad;      /* 버린 사용자 수 (CRC 불일치 등) */
+
+    /*
+     * 읽기 방향(DM이 받아 감)의 자리표.
+     * 순서대로 물어 오는 동안에는 **마지막으로 준 사용자 ID 다음부터** 읽는다(빠르다).
+     * 건너뛰어 물으면 offset으로 되감는다(느리지만 드물다).
+     */
+    int      send_active;
+    int      send_have_base;
+    uint16_t send_base_index;  /* 첫 조각의 번호 - 0부터인지 1부터인지 DM이 정한다 */
+    uint16_t send_next_index;  /* 다음에 올 것으로 기대하는 번호 */
+    uint8_t  send_last_id[ACU_USER_ID_LEN]; /* 마지막으로 보낸 사용자 */
+    int      send_have_last;
 };
+
+/* 한 조각에 담기는 레코드 수 */
+#define USERBIN_SEND_RECORDS (USERBIN_SEND_CHUNK / IDTI_USERBIN_REC_INFO_LEN)
 
 AcuUserBin *userbin_create(AcuUsers *users)
 {
@@ -412,4 +427,156 @@ uint32_t userbin_result_event(const AcuUserBin *ub)
         return IDTI_EVENT_USERFILE_PARTIAL;
     }
     return IDTI_EVENT_USERFILE_SUCCESS;
+}
+
+
+/* ---- 읽기 방향: DM이 우리 명단을 받아 간다 ---- */
+
+int userbin_receive_start(AcuUserBin *ub, uint8_t binary_obj,
+                          uint32_t *out_total_size, uint32_t *out_total_count)
+{
+    if (!ub || !out_total_size || !out_total_count)
+    {
+        return -1;
+    }
+
+    /*
+     * 우리는 카드 전용이라 지문 포함 구조로는 내보내지 않는다.
+     * 지문을 요청받으면 거절하는 편이 낫다 — 빈 지문으로 채워 보내면 DM이 지문이 있다고 믿는다.
+     */
+    if (binary_obj != IDTI_USERBIN_OBJ_INFO)
+    {
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "사용자 바이너리: 읽기 요청의 Binary OBJ 0x%02x는 내보내지 않는다 (카드 전용)",
+                 binary_obj);
+        log_msg(line);
+        return -1;
+    }
+
+    long long count = users_count(ub->users);
+    if (count < 0)
+    {
+        return -1;
+    }
+
+    ub->send_active = 1;
+    ub->send_have_base = 0;
+    ub->send_next_index = 0;
+    ub->send_have_last = 0;
+    memset(ub->send_last_id, 0, sizeof(ub->send_last_id));
+
+    *out_total_count = (uint32_t)count;
+    *out_total_size = (uint32_t)(count * IDTI_USERBIN_REC_INFO_LEN);
+
+    char line[200];
+    snprintf(line, sizeof(line),
+             "사용자 바이너리: 읽기 시작 - %lld명 / %u byte (조각 %d byte = %d명)",
+             count, *out_total_size, USERBIN_SEND_CHUNK, USERBIN_SEND_RECORDS);
+    log_msg(line);
+    return 0;
+}
+
+/*
+ * 사용자 한 명을 `_SSCUserInfo` 128byte로 만든다.
+ *
+ * `flag`/`serial`은 규약상 **사용자 인덱스**(0 ~ 0xFFFFFFFE)다. 기존 장비는 262,144칸짜리
+ * 고정 표를 쓰므로 그 칸 번호가 곧 인덱스지만, 우리는 명단을 통째로 교체하는 구조라
+ * 고정 칸이 없다. 그래서 **user_id 순서에서의 자리(0부터)** 를 인덱스로 쓴다.
+ * ⚠ DM이 내려보낼 때 실은 serial을 그대로 돌려받기를 기대한다면 맞지 않는다 — DM에 확인할 것.
+ */
+static void build_record(const AcuUserRecord *r, const AcuUserCard *card,
+                         uint32_t index, uint8_t *rec)
+{
+    memset(rec, 0, IDTI_USERBIN_REC_INFO_LEN);
+
+    for (int i = 0; i < 4; i++)
+    {
+        uint8_t b = (uint8_t)(index >> ((3 - i) * 8));
+        rec[i] = b;     /* flag[4]   */
+        rec[4 + i] = b; /* serial[4] */
+    }
+
+    userbin_build_user_info(r, rec + IDTI_USERBIN_OFF_USER);
+    memcpy(rec + IDTI_USERBIN_OFF_NAME, r->lcd_name, ACU_USER_NAME_LEN);
+    memcpy(rec + IDTI_USERBIN_OFF_GROUP, r->group_codes, ACU_USER_GROUP_LEN);
+
+    rec[IDTI_USERBIN_OFF_RESTRICT]     = r->restrict_type;
+    rec[IDTI_USERBIN_OFF_RESTRICT + 1] = r->restrict_limit_type;
+    rec[IDTI_USERBIN_OFF_RESTRICT + 2] = r->restrict_limit_count;
+
+    /* 바이너리 경로의 카드는 **큰 자리부터 그대로**다 (받을 때와 같은 규칙) */
+    if (card && !userbin_all_zero(card->card_id, ACU_USER_CARD_LEN))
+    {
+        memcpy(rec + IDTI_USERBIN_OFF_CARD, card->card_id, ACU_USER_CARD_LEN);
+    }
+
+    rec[IDTI_USERBIN_OFF_CRC_CALC] = 0x01; /* 규약 고정값 */
+
+    uint8_t crc = 0;
+    for (int i = IDTI_USERBIN_OFF_USER; i <= IDTI_USERBIN_OFF_CRC_CALC; i++)
+    {
+        crc ^= rec[i];
+    }
+    rec[IDTI_USERBIN_OFF_DATACRC] = crc;
+}
+
+int userbin_receive_chunk(AcuUserBin *ub, uint16_t index, uint8_t *out, size_t out_cap)
+{
+    if (!ub || !out || out_cap < USERBIN_SEND_CHUNK)
+    {
+        return -1;
+    }
+    if (!ub->send_active)
+    {
+        log_msg("사용자 바이너리: 읽기 Start 없이 조각을 물었다");
+        return -1;
+    }
+
+    /* 첫 조각의 번호로 기준을 잡는다 — 규약에 0부터인지 1부터인지 없다 */
+    if (!ub->send_have_base)
+    {
+        ub->send_base_index = index;
+        ub->send_next_index = index;
+        ub->send_have_base = 1;
+    }
+
+    static AcuUserRecord recs[USERBIN_SEND_RECORDS];
+    static AcuUserCard  cards[USERBIN_SEND_RECORDS];
+    int n;
+    long long first = (long long)(uint16_t)(index - ub->send_base_index) * USERBIN_SEND_RECORDS;
+
+    if (index == ub->send_next_index && ub->send_have_last)
+    {
+        /* 순서대로 물어 오는 흔한 경우 — 마지막으로 준 사람 다음부터 */
+        n = users_read_after(ub->users, ub->send_last_id, USERBIN_SEND_RECORDS, recs, cards);
+    }
+    else if (index == ub->send_base_index)
+    {
+        n = users_read_after(ub->users, NULL, USERBIN_SEND_RECORDS, recs, cards);
+    }
+    else
+    {
+        /* 건너뛰거나 되돌아간 경우 — 앞을 세면서 찾아간다 (느리지만 드물다) */
+        n = users_read_at(ub->users, first, USERBIN_SEND_RECORDS, recs, cards);
+    }
+
+    if (n < 0)
+    {
+        return -1;
+    }
+
+    for (int i = 0; i < n; i++)
+    {
+        build_record(&recs[i], &cards[i], (uint32_t)(first + i),
+                     out + (size_t)i * IDTI_USERBIN_REC_INFO_LEN);
+    }
+
+    if (n > 0)
+    {
+        memcpy(ub->send_last_id, recs[n - 1].user_id, ACU_USER_ID_LEN);
+        ub->send_have_last = 1;
+        ub->send_next_index = (uint16_t)(index + 1);
+    }
+    return n * IDTI_USERBIN_REC_INFO_LEN;
 }

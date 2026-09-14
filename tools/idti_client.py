@@ -393,6 +393,56 @@ def send_userbin(sock, timeout, count, chunk_size, raw=False, corrupt=False):
     return 0
 
 
+def recv_userbin(sock, timeout, raw=False):
+    """DM 쪽 동작 흉내: 우리 명단을 바이너리로 받아 온다 (UserBinTransReceive)."""
+    # Start
+    req = build_request(CMD_REQ_DATA, SUBCMD_READ, OBJ_USERBIN_START,
+                        frame_index=1, data=bytes([0x01]))
+    sock.sendall(req)
+    body = response_body(recv_packet(sock, timeout))
+    if body is None or len(body) < 10:
+        print("  Start -> 응답 없음/짧음")
+        return None
+    total_size = int.from_bytes(body[0:4], "big")
+    total_count = int.from_bytes(body[4:8], "big")
+    print(f"  Start    -> 총 {total_count}명 / {total_size}byte / OBJ 0x{body[8]:02x}")
+
+    # Continue
+    blob = bytearray()
+    index = 0
+    frame_index = 2
+    while len(blob) < total_size:
+        req = build_request(CMD_REQ_DATA, SUBCMD_READ, OBJ_USERBIN_CONTINUE,
+                            frame_index=frame_index, data=index.to_bytes(2, "big"))
+        sock.sendall(req)
+        body = response_body(recv_packet(sock, timeout))
+        if body is None or len(body) < 2:
+            print(f"  Continue {index} -> 응답 없음")
+            return None
+        got_index = int.from_bytes(body[0:2], "big")
+        part = body[2:]
+        print(f"  Continue {index:>4} -> 번호 {got_index}, {len(part)}byte")
+        if not part:
+            break
+        blob += part
+        index += 1
+        frame_index += 1
+
+    print(f"  받은 합계 {len(blob)}byte (알린 크기 {total_size})")
+    return bytes(blob), total_size, total_count
+
+
+def response_body(resp):
+    """응답에서 장치상태를 뺀 데이터 부분"""
+    if resp is None or len(resp) < HEADER_LEN + TAIL_LEN:
+        return None
+    body = resp[HEADER_LEN:-TAIL_LEN]
+    opt = int.from_bytes(resp[4:6], "big")
+    if not (opt & FOPT_EXCLUDE_DEVICE_STATUS) and len(body) >= DEVICE_STATUS_V2_LEN:
+        body = body[DEVICE_STATUS_V2_LEN:]
+    return bytes(body)
+
+
 def userbin_ack(resp):
     """응답에서 Result 1byte를 꺼낸다 (장치상태 뒤에 붙는다). 없으면 None"""
     if resp is None or len(resp) < HEADER_LEN + 1:
@@ -410,7 +460,7 @@ def main():
     ap.add_argument("--port", type=int, default=9870, help="ACU 포트 (기본 9870)")
     ap.add_argument("--request",
                     choices=["history", "status", "lcd-check", "lcd-change", "lang-check", "lang-change",
-                             "userbin"],
+                             "userbin", "userbin-recv"],
                     default="history",
                     help="history=이벤트 로그 조회(기본), "
                          "status=장치 상태 요청(RequestStatus/Read/Firmware — PC가 접속 후 보내는 첫 명령)")
@@ -447,6 +497,18 @@ def main():
     else:  # lang-change
         command, sub, obj = CMD_SND_STATUS, SUBCMD_CHANGE, OBJ_MULTI_LANGUAGE
         data = bytes([7])  # Korean
+
+    if args.request == "userbin-recv":
+        try:
+            sock = socket.create_connection((args.host, args.port), timeout=args.timeout)
+        except OSError as e:
+            print(f"접속 실패 {args.host}:{args.port} - {e}")
+            return 1
+        print(f"접속됨 {args.host}:{args.port}")
+        try:
+            return 0 if recv_userbin(sock, args.timeout, raw=args.raw) else 1
+        finally:
+            sock.close()
 
     if args.request == "userbin":
         try:

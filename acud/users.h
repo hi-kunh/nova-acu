@@ -104,6 +104,23 @@ int users_lookup_by_id(AcuUsers *u, const uint8_t user_id[ACU_USER_ID_LEN],
 int users_lookup_card_by_user(AcuUsers *u, const uint8_t user_id[ACU_USER_ID_LEN],
                               AcuUserCard *out);
 
+/*
+ * 사용자를 **user_id 순서로** 읽는다 (DM이 명단을 받아 갈 때 쓴다).
+ * cards[i]는 그 사람의 카드 — 없으면 전부 0으로 채운다.
+ *
+ * after_id가 NULL이면 처음부터, 아니면 **그 ID 다음부터**. 순서대로 읽을 때 쓴다(빠르다).
+ * 반환: 채운 수(0 이상), 오류면 -1
+ */
+int users_read_after(AcuUsers *u, const uint8_t *after_id, int max,
+                     AcuUserRecord *recs, AcuUserCard *cards);
+
+/*
+ * offset번째부터 읽는다 (되감기용). SQLite가 앞을 세면서 건너뛰므로 **느리다** —
+ * 순서대로 읽을 때는 users_read_after()를 쓴다.
+ */
+int users_read_at(AcuUsers *u, long long offset, int max,
+                  AcuUserRecord *recs, AcuUserCard *cards);
+
 /* 등록된 사용자 수. 오류면 -1 */
 long long users_count(const AcuUsers *u);
 

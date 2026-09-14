@@ -31,6 +31,8 @@ struct AcuUsers {
     sqlite3_stmt *st_put_card;
     sqlite3_stmt *st_delete;
     sqlite3_stmt *st_card_by_user;
+    sqlite3_stmt *st_read_after;
+    sqlite3_stmt *st_read_at;
 
     /* 전체 다운로드용 */
     sqlite3_stmt *st_load_put;
@@ -55,6 +57,18 @@ struct AcuUsers {
     " lcd_name, restrict_type, restrict_limit_type, restrict_limit_count, group_codes"
 
 #define USERS_PLACEHOLDERS "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+
+/*
+ * 같은 컬럼들을 표 이름으로 한정한 것. `user_cards`와 JOIN 할 때 `user_id`가 양쪽에 있어
+ * 한정하지 않으면 "ambiguous column name"으로 준비가 실패한다.
+ * **위 USERS_COLUMNS와 순서가 같아야 한다** — 읽는 쪽(read_record)이 순서를 전제한다.
+ */
+#define USERS_COLUMNS_Q \
+    "users.user_id, users.general_group, users.revision_id, users.access_option, users.level," \
+    " users.validation_code, users.timezone_code, users.expired_date, users.prox_type," \
+    " users.prox_wiegand, users.bio_type, users.bio_type_sub, users.template_count," \
+    " users.access_password, users.canteen_code, users.lcd_name, users.restrict_type," \
+    " users.restrict_limit_type, users.restrict_limit_count, users.group_codes"
 
 #define USERS_TABLE_DDL(name) \
     "CREATE TABLE IF NOT EXISTS " name " (" \
@@ -183,7 +197,15 @@ AcuUsers *users_open(const char *path)
             "INSERT OR REPLACE INTO user_cards(card_id, user_id, prox_raw) VALUES(?,?,?)") ||
         !prepare_one(u, &u->st_delete, "DELETE FROM users WHERE user_id = ?") ||
         !prepare_one(u, &u->st_card_by_user,
-            "SELECT card_id, user_id, prox_raw FROM user_cards WHERE user_id = ? LIMIT 1"))
+            "SELECT card_id, user_id, prox_raw FROM user_cards WHERE user_id = ? LIMIT 1") ||
+        !prepare_one(u, &u->st_read_after,
+            "SELECT " USERS_COLUMNS_Q ", c.card_id, c.prox_raw"
+            "  FROM users LEFT JOIN user_cards c ON c.user_id = users.user_id"
+            " WHERE users.user_id > ? ORDER BY users.user_id LIMIT ?") ||
+        !prepare_one(u, &u->st_read_at,
+            "SELECT " USERS_COLUMNS_Q ", c.card_id, c.prox_raw"
+            "  FROM users LEFT JOIN user_cards c ON c.user_id = users.user_id"
+            " ORDER BY users.user_id LIMIT ? OFFSET ?"))
     {
         users_close(u);
         return NULL;
@@ -208,6 +230,8 @@ void users_close(AcuUsers *u)
     sqlite3_finalize(u->st_put_card);
     sqlite3_finalize(u->st_delete);
     sqlite3_finalize(u->st_card_by_user);
+    sqlite3_finalize(u->st_read_after);
+    sqlite3_finalize(u->st_read_at);
     sqlite3_finalize(u->st_load_put);
     sqlite3_finalize(u->st_load_put_card);
     if (u->db)
@@ -353,6 +377,59 @@ int users_lookup_card_by_user(AcuUsers *u, const uint8_t user_id[ACU_USER_ID_LEN
     }
     sqlite3_reset(u->st_card_by_user);
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* 준비된 조회문 하나를 돌려 recs/cards를 채운다 (컬럼 배치가 같다) */
+static int read_rows(sqlite3_stmt *st, int max,
+                     AcuUserRecord *recs, AcuUserCard *cards)
+{
+    int n = 0;
+    int rc;
+    while (n < max && (rc = sqlite3_step(st)) == SQLITE_ROW)
+    {
+        read_record(st, &recs[n]);
+
+        memset(&cards[n], 0, sizeof(cards[n]));
+        memcpy(cards[n].user_id, recs[n].user_id, ACU_USER_ID_LEN);
+        /* LEFT JOIN이라 카드가 없으면 NULL이 온다 - 그때는 0으로 둔다 */
+        int base = 20; /* USERS_COLUMNS의 컬럼 수 */
+        column_blob_fixed(st, base,     cards[n].card_id, ACU_USER_CARD_LEN);
+        column_blob_fixed(st, base + 1, cards[n].prox_raw, ACU_USER_PROX_LEN);
+        n++;
+    }
+    sqlite3_reset(st);
+    return n;
+}
+
+int users_read_after(AcuUsers *u, const uint8_t *after_id, int max,
+                     AcuUserRecord *recs, AcuUserCard *cards)
+{
+    if (!u || !u->st_read_after || !recs || !cards || max <= 0)
+    {
+        return -1;
+    }
+    static const uint8_t ZERO_ID[ACU_USER_ID_LEN] = {0};
+
+    sqlite3_reset(u->st_read_after);
+    sqlite3_clear_bindings(u->st_read_after);
+    sqlite3_bind_blob(u->st_read_after, 1, after_id ? after_id : ZERO_ID,
+                      ACU_USER_ID_LEN, SQLITE_TRANSIENT);
+    sqlite3_bind_int(u->st_read_after, 2, max);
+    return read_rows(u->st_read_after, max, recs, cards);
+}
+
+int users_read_at(AcuUsers *u, long long offset, int max,
+                  AcuUserRecord *recs, AcuUserCard *cards)
+{
+    if (!u || !u->st_read_at || !recs || !cards || max <= 0 || offset < 0)
+    {
+        return -1;
+    }
+    sqlite3_reset(u->st_read_at);
+    sqlite3_clear_bindings(u->st_read_at);
+    sqlite3_bind_int(u->st_read_at, 1, max);
+    sqlite3_bind_int64(u->st_read_at, 2, (sqlite3_int64)offset);
+    return read_rows(u->st_read_at, max, recs, cards);
 }
 
 long long users_count(const AcuUsers *u)
@@ -609,6 +686,8 @@ int users_load_commit(AcuUsers *u)
     sqlite3_finalize(u->st_put_card); u->st_put_card = NULL;
     sqlite3_finalize(u->st_delete);   u->st_delete = NULL;
     sqlite3_finalize(u->st_card_by_user); u->st_card_by_user = NULL;
+    sqlite3_finalize(u->st_read_after);    u->st_read_after = NULL;
+    sqlite3_finalize(u->st_read_at);       u->st_read_at = NULL;
     sqlite3_finalize(u->st_load_put);      u->st_load_put = NULL;
     sqlite3_finalize(u->st_load_put_card); u->st_load_put_card = NULL;
 
@@ -643,7 +722,15 @@ int users_load_commit(AcuUsers *u)
             "INSERT OR REPLACE INTO user_cards(card_id, user_id, prox_raw) VALUES(?,?,?)") ||
         !prepare_one(u, &u->st_delete, "DELETE FROM users WHERE user_id = ?") ||
         !prepare_one(u, &u->st_card_by_user,
-            "SELECT card_id, user_id, prox_raw FROM user_cards WHERE user_id = ? LIMIT 1"))
+            "SELECT card_id, user_id, prox_raw FROM user_cards WHERE user_id = ? LIMIT 1") ||
+        !prepare_one(u, &u->st_read_after,
+            "SELECT " USERS_COLUMNS_Q ", c.card_id, c.prox_raw"
+            "  FROM users LEFT JOIN user_cards c ON c.user_id = users.user_id"
+            " WHERE users.user_id > ? ORDER BY users.user_id LIMIT ?") ||
+        !prepare_one(u, &u->st_read_at,
+            "SELECT " USERS_COLUMNS_Q ", c.card_id, c.prox_raw"
+            "  FROM users LEFT JOIN user_cards c ON c.user_id = users.user_id"
+            " ORDER BY users.user_id LIMIT ? OFFSET ?"))
     {
         log_msg("사용자 저장: 교체 뒤 SQL을 다시 준비하지 못했다 - 재시작이 필요하다");
         return -1;

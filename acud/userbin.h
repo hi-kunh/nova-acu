@@ -64,6 +64,31 @@ int userbin_in_progress(const AcuUserBin *ub);
 void userbin_abort(AcuUserBin *ub);
 
 /*
+ * ---- 읽기 방향: DM이 우리 명단을 받아 간다 (`UserBinTransReceive`) ----
+ *
+ *   Start     Cmd 6 / Sub 2 / Obj 0xD0   Data(1) = Binary OBJ
+ *             -> Data(10) = 총 크기(4) + 총 인원(4) + Binary OBJ(1) + Reserved(1)
+ *   Continue  Cmd 6 / Sub 2 / Obj 0xD1   Data(2) = 조각 번호
+ *             -> Data(2+N) = 조각 번호(2) + 명단 일부
+ *
+ * 조각 크기는 **장치가 정한다**(규약: "data size = depend on controller").
+ * 우리는 규약의 N 목록 중 레코드 128byte로 나누어떨어지는 **14,464byte(113명)** 를 쓴다.
+ */
+
+/* 읽기를 시작한다. 총 크기·총 인원을 채운다. 반환: 0=성공, -1=모르는 Binary OBJ */
+int userbin_receive_start(AcuUserBin *ub, uint8_t binary_obj,
+                          uint32_t *out_total_size, uint32_t *out_total_count);
+
+/*
+ * 조각 하나를 만든다. out은 최소 USERBIN_SEND_CHUNK byte.
+ * 반환: 채운 byte 수(0이면 더 없음), 오류면 -1
+ */
+int userbin_receive_chunk(AcuUserBin *ub, uint16_t index, uint8_t *out, size_t out_cap);
+
+/* 한 조각에 담는 크기 — 규약 N 목록 중 128·1808 둘 다로 나누어떨어지는 값 */
+#define USERBIN_SEND_CHUNK 14464
+
+/*
  * ---- 규약 레코드 ↔ 저장 구조체 변환 ----
  *
  * User Info 32byte는 **바이너리 전송과 1명씩 경로가 같은 것을 쓴다**(`3.` 문서 A절).
