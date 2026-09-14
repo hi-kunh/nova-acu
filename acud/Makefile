@@ -25,7 +25,12 @@ userstest: users_test
 users_test: ../tools/users_test.c users.c log.c
 	$(CC) $(CFLAGS) -o users_test ../tools/users_test.c users.c log.c -lsqlite3
 
-clean:
-	rm -f $(TARGET) events_bench users_bench users_test
+# ACU↔RRU 프로토콜 문서의 프레임 규칙·참조 코드 검산 (tools/rru_proto_check.c)
+rrucheck: rru_proto_check
+rru_proto_check: ../tools/rru_proto_check.c
+	$(CC) $(CFLAGS) -o rru_proto_check ../tools/rru_proto_check.c
 
-.PHONY: run bench usersbench userstest clean
+clean:
+	rm -f $(TARGET) events_bench users_bench users_test rru_proto_check
+
+.PHONY: run bench usersbench userstest rrucheck clean
