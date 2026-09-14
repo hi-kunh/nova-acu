@@ -31,10 +31,13 @@
 /* 고립망에는 NTP 서버가 없을 수 있다. 상위 시스템이 유일한 시각 공급원이므로 기본은 켬 */
 #define ACU_DEFAULT_TIME_SYNC 1
 
-/* 모듈 4개 x 14슬롯 (리더2 + 입력6 + 출력4 + 알람·화재2) = 리더8 / 입력32 / 출력16 */
-#define ACU_DEFAULT_MODULE_INSTALL_TYPE IDTI_MODULE_INSTALL_EXTERNAL
-/* ModuleType은 아직 확정 전이다. DM 화면을 보고 맞춰야 한다 */
-#define ACU_DEFAULT_MODULE_TYPE IDTI_MODULE_TYPE_RXM_132
+/*
+ * 모듈 종류·설치 형태는 **현장 SSC-324와 같은 값**으로 맞춘다 (2026-09-11 DM 회신 6-3).
+ * ACU03·ACU04의 devmodule1·2가 modeltype 61 / installedtype 1이고, NCU는 그 장비를 대체한다.
+ * (이전 값 123 / 2는 규약 문서에서 고른 추정값이었다)
+ */
+#define ACU_DEFAULT_MODULE_INSTALL_TYPE IDTI_MODULE_INSTALL_INTERNAL
+#define ACU_DEFAULT_MODULE_TYPE IDTI_MODULE_TYPE_SSC_324
 #define ACU_INACTIVITY_MAX 65535  /* 프레임의 2byte 필드 한계 */
 
 void config_set_defaults(AcuConfig *cfg)

@@ -39,13 +39,11 @@ void discover_set_connected(AcuDiscover *d, int connected);
 /* select()에 넣을 수신 fd. d가 NULL이면 -1. */
 int discover_fd(const AcuDiscover *d);
 
-/* fd가 읽기 가능할 때 호출한다. 요청 한 건을 처리한다. */
-void discover_service(AcuDiscover *d);
-
 /*
- * net_poll을 쓸 수 없을 때(TCP 서버 초기화 실패) 쓰는 자체 대기 루프.
- * 오히려 그때가 PC가 장비를 찾아야 하는 상황이라 탐색은 살아 있어야 한다.
+ * fd가 읽기 가능할 때 호출한다. 요청 한 건을 처리한다.
+ * 이 fd는 main이 이벤트 루프(loop.h)에 직접 등록하므로 TCP 서버가 못 떠도 탐색은 계속 답한다 -
+ * 오히려 그때가 PC가 장비를 찾아야 하는 상황이다.
  */
-void discover_wait(AcuDiscover *d, int timeout_ms);
+void discover_service(AcuDiscover *d);
 
 #endif /* ACU_DISCOVER_H */

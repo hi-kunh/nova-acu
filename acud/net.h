@@ -2,6 +2,7 @@
 #define ACU_NET_H
 
 #include "access.h"
+#include "loop.h"
 
 /*
  * 네트워크 통신부 (5단계, IDTi 프로토콜 V2, TCP 전용).
@@ -39,27 +40,29 @@ AcuNet *net_init(int port);
 void net_shutdown(AcuNet *net);
 
 /*
- * 접속/수신/응답을 최대 timeout_ms 동안 처리한다 (select 기반, non-blocking).
- * main 루프에서 sleep() 대신 주기적으로 호출한다. net이 NULL이면 아무 일도 하지 않는다.
+ * 메인 이벤트 루프에 붙인다. 리슨 fd를 등록하고, 접속이 들어오면 클라이언트 fd도 스스로 등록한다.
+ * 예전에는 net.c가 자기 select를 돌았지만(net_poll), 그러면 카드 입력처럼 다른 fd가
+ * 같은 대기에 끼어들 수 없었다. 이제 select는 loop.c 한 곳이다.
+ * 반환: 0=성공, -1=실패. net_shutdown()이 등록을 해제한다.
  */
-void net_poll(AcuNet *net, int timeout_ms);
+int net_attach_loop(AcuNet *net, AcuLoop *loop);
 
 /*
- * net_poll의 select에 같이 감시할 읽기 fd를 하나 등록한다.
- * UDP 탐색처럼 별도 소켓을 쓰는 기능이 자기 select 루프를 따로 돌지 않아도 되게 하기 위함이다
- * (루프가 둘이면 한쪽이 블록되는 동안 다른 쪽 응답이 늦어진다).
- * net.c는 그 fd가 무엇인지 알 필요가 없다 - 읽기 가능해지면 on_readable(user)를 부를 뿐이다.
- * fd < 0 이면 등록을 해제한다.
+ * 유휴 타임아웃을 검사해 필요하면 연결을 닫는다.
+ * 소켓이 조용한 것 자체가 판단 근거라 소켓 이벤트로는 알 수 없다 - main의 점검 타이머가 부른다.
  */
-void net_set_aux_reader(AcuNet *net, int fd, void (*on_readable)(void *user), void *user);
+void net_check_inactivity(AcuNet *net);
 
 /*
  * 출입 판정 결과를 IDTi Event Log(History, Object 0x01)로 상위 시스템에 보고할 큐에 넣는다.
  * id_hex: 허용 시 User ID, 거부 시 Card ID (IDTi Event Structure의 Access ID 규칙과 동일), 16자 hex 문자열.
  * door_status: IDTI_DOOR_STATUS_* 값 (판정 시점의 문 상태).
+ * module_addr / reader_addr: 이벤트 주소(Event Structure byte 6·7). **1부터** 세고 DM이 원시값을
+ *   그대로 화면에 쓴다. 카드가 올라온 RRU·리더에서 계산한다 (HARDWARE.md "이벤트 주소").
  * DB 오류(ACCESS_DENIED_DB_ERROR)는 상위 시스템에 보고할 실질적 의미가 없어 무시한다.
  */
-void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status);
+void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status,
+                    int module_addr, int reader_addr);
 
 /* 상위 시스템이 지금 붙어 있는지 (netmodule IMIN의 Connect 필드에 실린다). net이 NULL이면 0 */
 int net_is_connected(const AcuNet *net);

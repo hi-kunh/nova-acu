@@ -828,25 +828,3 @@ void discover_service(AcuDiscover *d)
     snprintf(line, sizeof(line), "탐색: 알 수 없는 요청 %ld byte (%s) - 무시", (long)n, who);
     log_msg(line);
 }
-
-/* TCP 서버 없이 도는 동안 탐색만 기다린다 (최대 timeout_ms) */
-void discover_wait(AcuDiscover *d, int timeout_ms)
-{
-    if (!d || d->fd < 0)
-    {
-        return;
-    }
-
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(d->fd, &rfds);
-
-    struct timeval tv;
-    tv.tv_sec  = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-    if (select(d->fd + 1, &rfds, NULL, NULL, &tv) > 0 && FD_ISSET(d->fd, &rfds))
-    {
-        discover_service(d);
-    }
-}

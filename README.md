@@ -1395,6 +1395,61 @@ HARDWARE.md · TODO.md · README.md의 파일 경로도 `dm/`으로 고쳤다.
 DM 쪽 파일 전달 과정에서 `dm/NCU_장치구조_프로토콜_안내.md` 자리에 질의서 내용이 들어가고, DM이 정리한 장치구조 문서는
 이름이 CP949로 깨진 파일로 들어왔다. 내용을 비교해 **질의서는 git 원본으로, 장치구조 문서는 DM 정리본으로** 제자리에 돌렸다.
 
+### 2026-09-14 (월, 오전) — DM 회신 반영 2건: 이벤트 주소 1부터, 모듈 종류 61
+
+9/11 회신에서 "고칠 것"으로 남겨 둔 두 가지를 보드까지 배포했다.
+
+| 고친 것 | 전 | 후 | 근거 |
+|---------|----|----|------|
+| 카드 이벤트 주소 | `Module=0 Reader=0` | **`Module=1 Reader=1`** | DM 파서는 byte 6·7을 가공 없이 쓴다 — 0이면 화면에서 어느 리더인지 알 수 없다 |
+| 모듈 종류 | `mType 123` / `installedtype 2`(External) | **`61` / `1`(Internal)** | 현장 SSC-324(ACU03·04)의 `devmodule1·2` 값. NCU는 그 장비를 대체한다 |
+
+- `IDTI_EVENT_ADDR_FIRST_MODULE` / `_FIRST_READER`, `IDTI_MODULE_TYPE_SSC_324`를 `protocol.h`에 두고
+  `NetEvent`에 `module_addr`·`reader_addr`를 추가했다. 예전 값 123/2는 규약 문서에서 고른 **추정값**이었다
+- 보드 확인: `type=61 Internal`, `ExistedModule=0x0003`, 카드 태그 시 `Module=1 Reader=1`
+- ⚠ DM 서버 쪽 표는 **"장치구조 다운로드"를 눌러야** 바뀐다 (폴링은 구조를 읽지 않는다 — 9/11 회신)
+
+### 2026-09-14 (월) — 이벤트 구동 구조: select를 한 곳으로, 2초 조회 제거
+
+**문제.** `main.c`가 `CARD_POLL_INTERVAL_MS 2000`마다 `hal_read_card()`를 부르고, 그 사이를 `net_poll()`의
+select가 채우는 구조였다. select가 net.c 안에만 있었고 외부 fd는 **하나만** 얹을 수 있어서
+(`net_set_aux_reader`, UDP 탐색이 그 자리를 썼다) 카드 입력은 select에 들어갈 수 없었다.
+→ **카드가 최대 2초 늦게 처리됐다.** RRU가 7대까지 붙으면 그 자리가 아예 부족하다.
+
+**바꾼 것.** select를 `loop.c` 한 곳으로 모았다. fd와 콜백을 여러 개 등록하는 작은 루프다.
+
+| 등록하는 쪽 | fd | 콜백이 하는 일 |
+|-------------|----|----------------|
+| `net.c` | 리슨 소켓 | accept → 클라이언트 fd를 **스스로 루프에 등록** |
+| `net.c` | 클라이언트 소켓 | 수신·요청 처리. 보내다 만 응답이 있을 때만 WRITE 감시를 켠다 |
+| `discover.c` | UDP 1460 | 탐색 요청 1건 처리 |
+| `hal_mock.c` | 카드 주입 FIFO | 들어온 카드를 즉시 판정 (6단계에서 **RRU 1~7의 USB fd**) |
+| `hal_mock.c` | 자동 순회 타이머 | `auto on`의 더미 카드 (예전엔 2초 조회에 얹혀 있었다) |
+| `main.c` | 점검 타이머 1초 | **아무 일도 없을 때** 봐야 하는 것 — 유휴 타임아웃, 탐색의 Connect 값 |
+
+- `hal.h`에 **`hal_input_fds()` / `hal_service_fd()`** 를 추가했다. 감시할 fd 목록을 HAL이 정해서 돌려주므로
+  main은 몇 개인지 알 필요가 없다 — 6단계에 RRU가 늘어도 main은 그대로다. 자리는 `HAL_RRU_MAX 7`로 잡아 뒀다
+- `hal_read_card()`는 이제 **RRU 번호도 함께** 돌려준다. `main.c`의 `module_addr_for_rru()`가
+  **RRU 번호 하나 = 모듈 2칸** 규칙으로 이벤트 주소를 만든다 (RRU r의 첫 모듈 = 2r-1)
+- 없앤 것: `CARD_POLL_INTERVAL_MS`, `timespec_diff_ms`/`timespec_add_ms`, `net_poll()`,
+  `net_set_aux_reader()`, `discover_wait()` (탐색 fd가 루프에 직접 들어가 TCP 서버가 못 떠도 답한다)
+- 유휴 타임아웃은 `net_check_inactivity()`로 분리했다. **조용한 것 자체가 판단 근거**라 소켓 이벤트로는 알 수 없다
+- 루프는 `loop_wait(loop, -1)`로 **무한 대기**한다. 깨울 일이 없으면 정말 아무 일도 하지 않는다.
+  콜백이 등록을 바꿀 수 있어서(accept가 fd를 더하고, 끊김이 fd를 뺀다) 준비된 fd를 **먼저 모아 둔 뒤** 부른다
+
+**확인** (개발 PC + 보드 192.168.0.250)
+
+| | 결과 |
+|---|------|
+| 카드 처리 지연 | 주입 → 판정 **같은 초** (전에는 최대 2초) |
+| 한 번에 여러 장 | 3장 연속 주입 → 3건 모두 판정·적재 |
+| 이벤트 주소 | `Module=1 Reader=1` |
+| 도어 접점 | 입력이 들어온 그 자리에서 갱신 (`DoorStatus=Open`) |
+| `auto on` 타이머 | 2초마다 1장 |
+| SIGHUP | 설정 리로드 정상. **포트 변경**도 재시작 없이 전환(루프 재등록) 후 이벤트 수신 확인 |
+| UDP 탐색 | `FIND` → `IMIN` 정상 |
+| 유휴 CPU | 개발 PC 0.0%, 보드 0.5% (DM 3초 폴링 중), RSS 2.7MB |
+
 ## 빌드 & 실행
 
 ```bash

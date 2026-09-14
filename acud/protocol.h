@@ -191,13 +191,23 @@
 
 /*
  * clsDevParams.ModuleType. 접미사 004/008/00C는 I/O 개수(4/8/12)로 보인다.
- * **우리 RRU가 이 중 무엇에 대응하는지는 아직 확정 전이라 config로 뺐다** (미확인 문서
- * `8. System Device Reader Setup` 확인 필요). 기본값은 8채널 계열로 잡았다.
+ * 값은 config로 뺄 수 있게 두되, **기본값은 현장 SSC-324와 같은 61/INTERNAL** 로 맞춘다
+ * (2026-09-11 DM 회신 6-3: ACU03·ACU04의 devmodule1·2가 modeltype 61, installedtype 1).
+ * 우리는 그 장비를 대체하는 것이므로 서버 화면에 같은 종류로 보여야 한다.
  */
+#define IDTI_MODULE_TYPE_SSC_324 61   /* 현장 SSC-324 실측값 — NCU 기본값 */
 #define IDTI_MODULE_TYPE_RIM_008 92   /* Reader 계열 8채널 */
 #define IDTI_MODULE_TYPE_ROM_008 102  /* Output 계열 8채널 */
 #define IDTI_MODULE_TYPE_RRM_008 112
 #define IDTI_MODULE_TYPE_RXM_132 123  /* 접미사가 (리더1, 입력3, 출력2)로 읽힌다 */
+
+/*
+ * 이벤트 정보 블록의 주소 두 칸(byte 6 Module / byte 7 Reader)은 **1부터** 센다.
+ * DM 파서는 ModuleAddress = bEvent[6], ReaderAddress = bEvent[7]로 원시값을 그대로 쓴다
+ * (2026-09-11 DM 회신). 0으로 보내면 서버 화면에서 어느 리더인지 알 수 없다.
+ */
+#define IDTI_EVENT_ADDR_FIRST_MODULE 1
+#define IDTI_EVENT_ADDR_FIRST_READER 1
 
 /*
  * 모듈 하나의 I/O 슬롯 구성 (2026-09-10 확정). 14슬롯을 꽉 채운다.

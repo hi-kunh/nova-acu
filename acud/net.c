@@ -3,6 +3,7 @@
 
 #include "net.h"
 #include "protocol.h"
+#include "loop.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -13,7 +14,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
-#include <sys/select.h>
 #include <netinet/in.h>
 
 #define NET_RECV_BUF_CAP 512
@@ -25,6 +25,8 @@ typedef struct {
     uint32_t event_code;
     uint8_t  id[8];
     uint8_t  door_status;
+    uint8_t  module_addr; /* 이벤트 주소: 모듈 번호 1~ (DM 파서가 원시값을 그대로 쓴다) */
+    uint8_t  reader_addr; /* 리더 번호 1·2 */
     time_t   ts;
 } NetEvent;
 
@@ -46,10 +48,12 @@ struct AcuNet {
     size_t queue_head;
     size_t queue_count;
 
-    /* net_poll의 select에 얹어 주는 외부 fd (UDP 탐색 등). -1이면 없음 */
-    int   aux_fd;
-    void (*aux_on_readable)(void *user);
-    void *aux_user;
+    /*
+     * 붙어 있는 이벤트 루프. 리슨 fd와 클라이언트 fd를 여기에 등록한다.
+     * 예전에는 net.c가 자기 select를 돌고 외부 fd를 하나만 얹을 수 있었는데(net_set_aux_reader),
+     * 그 구조 때문에 카드 입력이 select에 들어가지 못했다 (loop.h 머리말 참고).
+     */
+    AcuLoop *loop;
 
     /*
      * 유휴 타임아웃 (netmodule의 InactivityTime, 초). 0이면 끄기.
@@ -96,6 +100,7 @@ static void net_drop_client(AcuNet *net, const char *reason)
 {
     if (net->client_fd >= 0)
     {
+        loop_remove(net->loop, net->client_fd);
         close(net->client_fd);
         net->client_fd = -1;
     }
@@ -111,7 +116,7 @@ static void net_drop_client(AcuNet *net, const char *reason)
 /*
  * 송신 버퍼에 남은 바이트를 보낼 수 있는 만큼 보낸다.
  * 논블로킹 소켓이므로 커널 송신 버퍼가 차면 EAGAIN으로 일부만 나갈 수 있다 -> 나머지는 남겨 두고
- * 다음 net_poll()에서 쓰기 가능해질 때 이어 보낸다. SIGPIPE는 MSG_NOSIGNAL로 막는다.
+ * 루프가 쓰기 가능하다고 알려 줄 때 이어 보낸다. SIGPIPE는 MSG_NOSIGNAL로 막는다.
  */
 static void net_flush_send(AcuNet *net)
 {
@@ -136,6 +141,20 @@ static void net_flush_send(AcuNet *net)
     {
         net->send_len = 0;
         net->send_off = 0;
+    }
+
+    /*
+     * 보낼 것이 남아 있을 때만 쓰기 감시를 켠다.
+     * 켜 둔 채로 두면 소켓은 거의 항상 쓰기 가능하므로 select가 쉬지 않고 깨어난다.
+     */
+    if (net->client_fd >= 0)
+    {
+        unsigned events = ACU_LOOP_READ;
+        if (net->send_off < net->send_len)
+        {
+            events |= ACU_LOOP_WRITE;
+        }
+        loop_mod(net->loop, net->client_fd, events);
     }
 }
 
@@ -179,7 +198,6 @@ AcuNet *net_init(int port)
     }
     net->client_fd = -1;
     net->door_status = IDTI_DOOR_STATUS_NONE;
-    net->aux_fd = -1; /* calloc이 0으로 채우므로 명시적으로 -1을 넣어야 한다 */
     net->inactivity_seconds = 0; /* main이 설정값으로 덮어쓴다. 0이면 타임아웃 없음 */
     net->device_category = IDTI_DEVICE_CATEGORY_DEFAULT;
     net->device_type = IDTI_DEVICE_TYPE_DEFAULT;
@@ -234,8 +252,10 @@ void net_shutdown(AcuNet *net)
     }
     if (net->client_fd >= 0)
     {
+        loop_remove(net->loop, net->client_fd);
         close(net->client_fd);
     }
+    loop_remove(net->loop, net->listen_fd);
     close(net->listen_fd);
     free(net);
 }
@@ -280,7 +300,8 @@ static void hex_to_bytes(const char *hex, uint8_t *out, size_t out_len)
     }
 }
 
-void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status)
+void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status,
+                    int module_addr, int reader_addr)
 {
     if (!net || result == ACCESS_DENIED_DB_ERROR)
     {
@@ -300,6 +321,12 @@ void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int do
     ev->event_code = event_code_for_result(result);
     hex_to_bytes(id_hex, ev->id, sizeof(ev->id));
     ev->door_status = (uint8_t)door_status;
+    /*
+     * 이벤트 주소는 **1부터**다. DM은 byte 6·7을 가공 없이 화면에 쓴다
+     * (HARDWARE.md "이벤트 주소"). 어느 RRU·리더에서 온 카드인지는 호출자가 안다.
+     */
+    ev->module_addr = (uint8_t)module_addr;
+    ev->reader_addr = (uint8_t)reader_addr;
     ev->ts = time(NULL);
     net->queue_count++;
 }
@@ -414,8 +441,8 @@ static void build_event_info(uint8_t out[IDTI_EVENT_INFO_LEN], const NetEvent *e
     out[3] = (uint8_t)(ev->event_code);
     out[4] = IDTI_OPMODE_CARD;
     out[5] = 0x00; /* Reserved */
-    out[6] = 0x00; /* Module Address (단일 컨트롤러 -> 0) */
-    out[7] = 0x00; /* Reader Address (단일 리더 -> 0) */
+    out[6] = ev->module_addr; /* Module Address (1부터) */
+    out[7] = ev->reader_addr; /* Reader Address (1·2) */
     out[8] = ev->door_status;
     out[9] = IDTI_FUNC_NONE;
 
@@ -771,157 +798,133 @@ void net_set_inactivity_timeout(AcuNet *net, int seconds)
     }
 }
 
-void net_set_aux_reader(AcuNet *net, int fd, void (*on_readable)(void *user), void *user)
+/*
+ * 클라이언트 소켓이 준비됐을 때 루프가 부른다.
+ * 쓰기를 먼저 처리한다 - 보내다 만 응답을 비워야 이어지는 요청에 답할 자리가 생긴다.
+ */
+static void net_on_client_ready(int fd, unsigned events, void *user)
 {
-    if (!net)
-    {
-        return;
-    }
-    net->aux_fd = fd;
-    net->aux_on_readable = on_readable;
-    net->aux_user = user;
-}
+    AcuNet *net = (AcuNet *)user;
+    (void)fd;
 
-void net_poll(AcuNet *net, int timeout_ms)
-{
-    if (!net)
-    {
-        return;
-    }
-
-    fd_set readfds, writefds;
-    FD_ZERO(&readfds);
-    FD_ZERO(&writefds);
-    FD_SET(net->listen_fd, &readfds);
-    int maxfd = net->listen_fd;
-    if (net->aux_fd >= 0)
-    {
-        FD_SET(net->aux_fd, &readfds);
-        if (net->aux_fd > maxfd)
-        {
-            maxfd = net->aux_fd;
-        }
-    }
-    if (net->client_fd >= 0)
-    {
-        FD_SET(net->client_fd, &readfds);
-        if (net->send_off < net->send_len)
-        {
-            FD_SET(net->client_fd, &writefds); /* 보내다 만 응답이 남아 있으면 쓰기 가능해질 때 이어 보낸다 */
-        }
-        if (net->client_fd > maxfd)
-        {
-            maxfd = net->client_fd;
-        }
-    }
-
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-    int rc = select(maxfd + 1, &readfds, &writefds, NULL, &tv);
-
-    /*
-     * 유휴 타임아웃 검사. select가 timeout으로 깨어난 경우에도 해야 하므로 rc 검사보다 앞에 둔다.
-     * (아무 일도 일어나지 않는 것이 바로 우리가 잡으려는 상황이다)
-     */
-    if (net->client_fd >= 0 && net->inactivity_seconds > 0)
-    {
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        long idle = now.tv_sec - net->last_activity.tv_sec;
-        if (idle >= net->inactivity_seconds)
-        {
-            char line[160];
-            snprintf(line, sizeof(line),
-                     "네트워크: %ld초 동안 조용해 연결을 닫는다 (InactivityTime %d초)",
-                     idle, net->inactivity_seconds);
-            net_drop_client(net, line);
-        }
-    }
-
-    if (rc <= 0)
-    {
-        return;
-    }
-
-    if (net->aux_fd >= 0 && FD_ISSET(net->aux_fd, &readfds) && net->aux_on_readable)
-    {
-        net->aux_on_readable(net->aux_user);
-    }
-
-    if (net->client_fd >= 0 && FD_ISSET(net->client_fd, &writefds))
+    if (events & ACU_LOOP_WRITE)
     {
         net_flush_send(net);
     }
-
-    if (FD_ISSET(net->listen_fd, &readfds))
+    if (!(events & ACU_LOOP_READ) || net->client_fd < 0)
     {
-        int new_fd = accept(net->listen_fd, NULL, NULL);
-        if (new_fd >= 0)
-        {
-            if (net->client_fd >= 0)
-            {
-                net_drop_client(net, "네트워크: 기존 연결을 새 연결로 교체함 (동시 1개 연결만 지원)");
-            }
-            set_nonblocking(new_fd);
-            net->client_fd = new_fd;
-            net_touch_activity(net);
-            net->recv_len = 0;
-            net->send_len = 0;
-            net->send_off = 0;
-            log_msg("네트워크: 상위 시스템 연결됨");
-        }
+        return;
     }
 
-    if (net->client_fd >= 0 && FD_ISSET(net->client_fd, &readfds))
+    ssize_t n = recv(net->client_fd, net->recv_buf + net->recv_len,
+                     sizeof(net->recv_buf) - net->recv_len, 0);
+    if (n <= 0)
     {
-        ssize_t n = recv(net->client_fd, net->recv_buf + net->recv_len,
-                          sizeof(net->recv_buf) - net->recv_len, 0);
-        if (n <= 0)
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-            {
-                return;
-            }
-            net_drop_client(net, "네트워크: 상위 시스템 연결 끊김");
             return;
         }
-        net->recv_len += (size_t)n;
-        net_touch_activity(net);
+        net_drop_client(net, "네트워크: 상위 시스템 연결 끊김");
+        return;
+    }
+    net->recv_len += (size_t)n;
+    net_touch_activity(net);
 
-        size_t consumed = 0;
-        while (net->recv_len - consumed >= IDTI_HEADER_LEN_V2)
+    size_t consumed = 0;
+    while (net->recv_len - consumed >= IDTI_HEADER_LEN_V2)
+    {
+        IdtiHeader hdr;
+        const uint8_t *pkt = net->recv_buf + consumed;
+        size_t avail = net->recv_len - consumed;
+
+        if (idti_header_parse(pkt, avail, &hdr) != 0)
         {
-            IdtiHeader hdr;
-            const uint8_t *pkt = net->recv_buf + consumed;
-            size_t avail = net->recv_len - consumed;
-
-            if (idti_header_parse(pkt, avail, &hdr) != 0)
-            {
-                log_msg("네트워크: 잘못된 패킷 헤더 수신 -> 수신 버퍼 초기화");
-                consumed = net->recv_len;
-                break;
-            }
-            if (hdr.packet_length > NET_RECV_BUF_CAP)
-            {
-                log_msg("네트워크: 패킷 길이가 수신 버퍼보다 커서 버림");
-                consumed = net->recv_len;
-                break;
-            }
-            if (avail < hdr.packet_length)
-            {
-                break; /* 아직 패킷 전체가 도착하지 않음 */
-            }
-
-            handle_request(net, &hdr, pkt);
-            consumed += hdr.packet_length;
+            log_msg("네트워크: 잘못된 패킷 헤더 수신 -> 수신 버퍼 초기화");
+            consumed = net->recv_len;
+            break;
+        }
+        if (hdr.packet_length > NET_RECV_BUF_CAP)
+        {
+            log_msg("네트워크: 패킷 길이가 수신 버퍼보다 커서 버림");
+            consumed = net->recv_len;
+            break;
+        }
+        if (avail < hdr.packet_length)
+        {
+            break; /* 아직 패킷 전체가 도착하지 않음 */
         }
 
-        if (consumed > 0)
-        {
-            memmove(net->recv_buf, net->recv_buf + consumed, net->recv_len - consumed);
-            net->recv_len -= consumed;
-        }
+        handle_request(net, &hdr, pkt);
+        consumed += hdr.packet_length;
+    }
+
+    if (consumed > 0)
+    {
+        memmove(net->recv_buf, net->recv_buf + consumed, net->recv_len - consumed);
+        net->recv_len -= consumed;
+    }
+}
+
+/* 리슨 소켓에 접속이 들어왔을 때 루프가 부른다 */
+static void net_on_listen_ready(int fd, unsigned events, void *user)
+{
+    AcuNet *net = (AcuNet *)user;
+    (void)events;
+
+    int new_fd = accept(fd, NULL, NULL);
+    if (new_fd < 0)
+    {
+        return;
+    }
+    if (net->client_fd >= 0)
+    {
+        net_drop_client(net, "네트워크: 기존 연결을 새 연결로 교체함 (동시 1개 연결만 지원)");
+    }
+    set_nonblocking(new_fd);
+    net->client_fd = new_fd;
+    net_touch_activity(net);
+    net->recv_len = 0;
+    net->send_len = 0;
+    net->send_off = 0;
+
+    if (loop_add(net->loop, new_fd, ACU_LOOP_READ, net_on_client_ready, net) != 0)
+    {
+        net_drop_client(net, "네트워크: 새 연결을 루프에 등록하지 못해 끊음");
+        return;
+    }
+    log_msg("네트워크: 상위 시스템 연결됨");
+}
+
+int net_attach_loop(AcuNet *net, AcuLoop *loop)
+{
+    if (!net || !loop)
+    {
+        return -1;
+    }
+    net->loop = loop;
+    return loop_add(loop, net->listen_fd, ACU_LOOP_READ, net_on_listen_ready, net);
+}
+
+void net_check_inactivity(AcuNet *net)
+{
+    /*
+     * 아무 일도 일어나지 않는 것이 바로 우리가 잡으려는 상황이라, 소켓이 깨어나는 것과
+     * 무관하게 주기적으로 불려야 한다 (main의 점검 타이머가 부른다).
+     */
+    if (!net || net->client_fd < 0 || net->inactivity_seconds <= 0)
+    {
+        return;
+    }
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long idle = now.tv_sec - net->last_activity.tv_sec;
+    if (idle >= net->inactivity_seconds)
+    {
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "네트워크: %ld초 동안 조용해 연결을 닫는다 (InactivityTime %d초)",
+                 idle, net->inactivity_seconds);
+        net_drop_client(net, line);
     }
 }

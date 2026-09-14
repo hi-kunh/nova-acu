@@ -7,12 +7,16 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
+#include <stdint.h>
+#include <sys/timerfd.h>
 
 #include "log.h"
 #include "db.h"
 #include "access.h"
 #include "hal.h"
 #include "config.h"
+#include "loop.h"
 #include "net.h"
 #include "discover.h"
 #include "protocol.h"
@@ -25,7 +29,11 @@
  *   (db_path가 바뀌면 DB를 다시 열고, door_open_seconds는 바로 다음 판정부터 적용,
  *   tcp_port가 바뀌면 네트워크 서버도 재시작 없이 새 포트로 재개설)
  * - 카드 입력/도어 릴레이/센서는 모두 hal.h 인터페이스로만 접근한다.
- *   실제 GPIO/Wiegand 구현체(6단계)가 없는 지금은 hal_mock.c(더미 카드ID 순회)를 사용한다.
+ *   실제 GPIO/Wiegand 구현체(6단계)가 없는 지금은 hal_mock.c(FIFO 주입)를 사용한다.
+ * - **이벤트 구동**: select는 loop.c 한 곳에만 있고, 네트워크(리슨·클라이언트) · UDP 탐색 ·
+ *   카드 입력 fd가 모두 거기에 등록된다. 예전에는 main이 2초마다 hal_read_card()를 부르고
+ *   그 사이를 net_poll()의 select가 채웠는데, 그래서 카드가 최대 2초 늦게 처리됐다.
+ *   지금은 카드가 들어오는 즉시 그 fd가 깨어난다.
  * - 시작 시 PID 파일을 남긴다 (4단계 웹 설정 인터페이스가 SIGHUP을 보낼 대상을 알기 위함)
  * - 모든 경로는 cwd에 의존하지 않게 지정할 수 있다. systemd로 띄우면 cwd가 "/"라서
  *   상대경로로는 설정을 못 찾고 DB도 만들지 못한다. config 파일 경로는 -c 옵션으로,
@@ -37,7 +45,15 @@
  */
 
 #define DEFAULT_CONFIG_PATH "config.json" /* -c 로 덮어쓸 수 있다. 데몬으로 띄울 때는 절대경로를 준다 */
-#define CARD_POLL_INTERVAL_MS 2000 /* 카드 리더 조회 주기 (네트워크 처리량과 무관하게 항상 유지) */
+
+/*
+ * 점검 타이머 주기(초). 소켓·카드처럼 "무슨 일이 일어나서" 깨어나는 것이 아니라,
+ * **아무 일도 없을 때** 확인해야 하는 것들을 여기서 본다:
+ *   - 유휴 타임아웃 (조용한 것 자체가 판단 근거라 소켓 이벤트로는 알 수 없다)
+ *   - 탐색 응답에 실을 상위 시스템 연결 상태
+ * 카드 조회는 여기 들어가지 않는다 - 그것이 예전 2초 지연의 원인이었다.
+ */
+#define HOUSEKEEPING_INTERVAL_SEC 1
 
 static void print_usage(const char *argv0)
 {
@@ -64,27 +80,121 @@ static void apply_module_layout(AcuNet *net, const AcuConfig *cfg)
     net_set_module_layout(net, &layout);
 }
 
-/* net_poll의 select가 탐색 소켓을 읽을 수 있다고 알려줄 때 불린다 */
-static void on_discover_readable(void *user)
+/*
+ * 루프에 등록한 fd들이 깨어날 때 쓰는 묶음.
+ * 콜백은 user 포인터 하나만 받으므로 함께 봐야 하는 것을 여기 담아 넘긴다.
+ */
+typedef struct {
+    sqlite3          *db;
+    AcuNet           *net;
+    AcuDiscover      *disc;
+    const AcuConfig  *cfg;
+} AcuRuntime;
+
+/* UDP 탐색 소켓이 읽을 수 있을 때 */
+static void on_discover_readable(int fd, unsigned events, void *user)
 {
+    (void)fd; (void)events;
     discover_service((AcuDiscover *)user);
 }
 
-/* a - b를 밀리초로 반환한다 (CLOCK_MONOTONIC 기준) */
-static long timespec_diff_ms(struct timespec a, struct timespec b)
+/*
+ * 카드가 올라온 RRU 번호를 이벤트 주소(모듈 번호)로 바꾼다.
+ * **RRU 번호 하나가 모듈 2칸**을 차지하므로 RRU r의 첫 모듈은 2r-1이다
+ * (HARDWARE.md "RRU 여러 대 구성"). 리더 번호는 RRU 프레임이 알려 주게 될 값이라
+ * 지금은 첫 리더로 둔다 - mock에는 리더 구분이 없다.
+ */
+static int module_addr_for_rru(int rru)
 {
-    return (a.tv_sec - b.tv_sec) * 1000L + (a.tv_nsec - b.tv_nsec) / 1000000L;
+    if (rru < 1 || rru > HAL_RRU_MAX)
+    {
+        rru = 1;
+    }
+    return (rru - 1) * 2 + IDTI_EVENT_ADDR_FIRST_MODULE;
 }
 
-static void timespec_add_ms(struct timespec *ts, long ms)
+/* 지금 문 상태를 읽어 IDTI_DOOR_STATUS_* 로 돌려준다 */
+static int read_door_status(void)
 {
-    ts->tv_sec  += ms / 1000;
-    ts->tv_nsec += (ms % 1000) * 1000000L;
-    if (ts->tv_nsec >= 1000000000L)
+    return (hal_read_sensor(HAL_SENSOR_DOOR_CONTACT) == HAL_SENSOR_ACTIVE)
+           ? IDTI_DOOR_STATUS_OPEN : IDTI_DOOR_STATUS_CLOSED;
+}
+
+/*
+ * 카드 입력 fd가 깨어났을 때. 한 번에 여러 장이 들어와 있을 수 있으므로 큐가 빌 때까지 판정한다.
+ * 도어 접점도 같은 입력으로 바뀌므로(mock은 FIFO, 실제로는 RRU 프레임) 여기서 함께 갱신한다.
+ */
+static void on_card_readable(int fd, unsigned events, void *user)
+{
+    (void)events;
+    AcuRuntime *rt = (AcuRuntime *)user;
+
+    hal_service_fd(fd);
+
+    int door_status = read_door_status();
+    net_set_door_status(rt->net, door_status);
+
+    for (;;)
     {
-        ts->tv_nsec -= 1000000000L;
-        ts->tv_sec  += 1;
+        int rru = 1;
+        char card_id[17];
+        int has_card = hal_read_card(&rru, card_id, sizeof(card_id));
+        if (has_card == 0)
+        {
+            break;
+        }
+        if (has_card < 0)
+        {
+            log_msg("카드 리더 조회 오류");
+            break;
+        }
+
+        CardRecord record;
+        AccessResult result = access_judge(rt->db, card_id, &record);
+        access_log_result(card_id, result);
+
+        const char *id_hex = (result == ACCESS_GRANTED) ? record.user_id : card_id;
+        net_push_event(rt->net, result, id_hex, door_status,
+                       module_addr_for_rru(rru), IDTI_EVENT_ADDR_FIRST_READER);
+
+        if (result == ACCESS_GRANTED)
+        {
+            hal_open_door(rt->cfg->door_open_seconds);
+        }
     }
+}
+
+/* 점검 타이머가 만료될 때 (HOUSEKEEPING_INTERVAL_SEC 주기) */
+static void on_housekeeping(int fd, unsigned events, void *user)
+{
+    (void)events;
+    AcuRuntime *rt = (AcuRuntime *)user;
+
+    uint64_t expirations = 0;
+    if (read(fd, &expirations, sizeof(expirations)) != (ssize_t)sizeof(expirations))
+    {
+        return; /* 못 읽어도 다음 주기에 다시 온다 */
+    }
+
+    net_check_inactivity(rt->net);
+    discover_set_connected(rt->disc, net_is_connected(rt->net));
+}
+
+/* 카드 입력 fd들을 루프에 등록한다 (6단계에서는 RRU 1~7의 USB fd가 여기로 들어온다) */
+static void register_input_fds(AcuLoop *loop, AcuRuntime *rt)
+{
+    int fds[HAL_INPUT_FD_MAX];
+    int n = hal_input_fds(fds);
+    for (int i = 0; i < n; i++)
+    {
+        if (loop_add(loop, fds[i], ACU_LOOP_READ, on_card_readable, rt) != 0)
+        {
+            log_msg("입력 fd를 루프에 등록하지 못했다 - 그 입력은 처리되지 않는다");
+        }
+    }
+    char line[80];
+    snprintf(line, sizeof(line), "입력 fd %d개를 이벤트 루프에 등록 (RRU 최대 %d대)", n, HAL_RRU_MAX);
+    log_msg(line);
 }
 
 /* 시그널 핸들러에서는 이 플래그만 건드린다 (핸들러 안에서 복잡한 일을 하면 안 됨) */
@@ -212,13 +322,56 @@ int main(int argc, char **argv)
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
     AcuDiscover *disc = discover_init(&cfg);
-    if (net && disc)
+
+    /*
+     * 이벤트 루프. 여기가 이 데몬의 유일한 select다.
+     * 이것마저 못 만들면 기다릴 방법이 없어 종료한다 (calloc 실패 수준의 상황이다).
+     */
+    AcuLoop *loop = loop_create();
+    if (!loop)
     {
-        net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
+        log_msg("이벤트 루프 생성 실패 -> 종료");
+        discover_shutdown(disc);
+        net_shutdown(net);
+        db_close(db);
+        hal_shutdown();
+        remove(pid_path);
+        log_close();
+        return 1;
     }
 
-    struct timespec next_card_check;
-    clock_gettime(CLOCK_MONOTONIC, &next_card_check);
+    AcuRuntime rt = { db, net, disc, &cfg };
+
+    if (net)
+    {
+        net_attach_loop(net, loop);
+    }
+    if (disc)
+    {
+        loop_add(loop, discover_fd(disc), ACU_LOOP_READ, on_discover_readable, disc);
+    }
+    register_input_fds(loop, &rt);
+
+    /* 점검 타이머 (유휴 타임아웃·연결 상태). 없어도 본체는 돌아야 하므로 실패는 로그만 남긴다 */
+    int housekeeping_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (housekeeping_fd >= 0)
+    {
+        struct itimerspec its;
+        memset(&its, 0, sizeof(its));
+        its.it_value.tv_sec = HOUSEKEEPING_INTERVAL_SEC;
+        its.it_interval.tv_sec = HOUSEKEEPING_INTERVAL_SEC;
+        if (timerfd_settime(housekeeping_fd, 0, &its, NULL) != 0 ||
+            loop_add(loop, housekeeping_fd, ACU_LOOP_READ, on_housekeeping, &rt) != 0)
+        {
+            log_msg("점검 타이머 등록 실패 - 유휴 타임아웃이 동작하지 않는다");
+            close(housekeeping_fd);
+            housekeeping_fd = -1;
+        }
+    }
+    else
+    {
+        log_msg("점검 타이머 생성 실패 - 유휴 타임아웃이 동작하지 않는다");
+    }
 
     /* 메인 루프: 종료 시그널이 올 때까지 계속 돈다 */
     while (g_running)
@@ -256,6 +409,7 @@ int main(int argc, char **argv)
                     {
                         db_close(db);
                         db = new_db;
+                        rt.db = db;
                         db_seed_dummy_data(db);
                         log_msg("DB 경로 변경 적용됨 (재시작 없이 전환)");
                     }
@@ -270,17 +424,15 @@ int main(int argc, char **argv)
                     AcuNet *new_net = net_init(new_cfg.tcp_port);
                     if (new_net)
                     {
-                        net_shutdown(net);
+                        net_shutdown(net); /* 옛 소켓의 루프 등록도 여기서 풀린다 */
                         net = new_net;
-                        /* net을 새로 만들었으니 탐색 소켓과 유휴 타임아웃도 다시 얹어 준다 */
+                        rt.net = net;
+                        /* net을 새로 만들었으니 설정값과 루프 등록을 다시 얹어 준다 */
                         net_set_inactivity_timeout(net, new_cfg.inactivity_seconds);
                         net_set_device_identity(net, new_cfg.device_category, new_cfg.device_type);
                         net_set_time_sync(net, new_cfg.time_sync_enabled);
                         apply_module_layout(net, &new_cfg);
-                        if (disc)
-                        {
-                            net_set_aux_reader(net, discover_fd(disc), on_discover_readable, disc);
-                        }
+                        net_attach_loop(net, loop);
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");
                     }
                     else
@@ -304,66 +456,25 @@ int main(int argc, char **argv)
             }
         }
 
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        long remaining_ms = timespec_diff_ms(next_card_check, now);
-
-        if (remaining_ms <= 0)
+        /*
+         * 등록된 fd 중 하나가 준비될 때까지 기다린다. 깨어날 이유가 없으면 그냥 자고 있는다 -
+         * 주기적으로 무언가를 조회하지 않으므로 카드가 없는 동안 이 데몬은 아무 일도 하지 않는다.
+         * 시그널이 오면 select가 EINTR로 돌아오고, 위의 종료·리로드 검사로 이어진다.
+         */
+        if (loop_wait(loop, -1) < 0 && errno != EINTR)
         {
-            /*
-             * 카드 리더 조회는 네트워크 트래픽량과 무관하게 항상 일정 주기로 실행돼야 한다.
-             * (net_poll은 상위 시스템 요청이 몰리면 즉시 반환하므로, 그 경우에도 카드 조회
-             * 주기가 무너지지 않도록 별도 스케줄로 관리한다)
-             */
-            int door_status = (hal_read_sensor(HAL_SENSOR_DOOR_CONTACT) == HAL_SENSOR_ACTIVE)
-                              ? IDTI_DOOR_STATUS_OPEN : IDTI_DOOR_STATUS_CLOSED;
-            net_set_door_status(net, door_status);
-
-            /* 탐색 응답(IMIN)의 Connect 필드에 실을 값 */
-            discover_set_connected(disc, net_is_connected(net));
-
-            char card_id[17];
-            int has_card = hal_read_card(card_id, sizeof(card_id));
-
-            if (has_card > 0)
-            {
-                CardRecord record;
-                AccessResult result = access_judge(db, card_id, &record);
-                access_log_result(card_id, result);
-
-                const char *id_hex = (result == ACCESS_GRANTED) ? record.user_id : card_id;
-                net_push_event(net, result, id_hex, door_status);
-
-                if (result == ACCESS_GRANTED)
-                {
-                    hal_open_door(cfg.door_open_seconds);
-                }
-            }
-            else if (has_card < 0)
-            {
-                log_msg("카드 리더 조회 오류");
-            }
-
-            timespec_add_ms(&next_card_check, CARD_POLL_INTERVAL_MS);
-            remaining_ms = CARD_POLL_INTERVAL_MS;
-        }
-
-        if (net)
-        {
-            net_poll(net, (int)remaining_ms); /* 다음 카드 조회 시각까지 상위 시스템 접속/요청 처리 */
-        }
-        else if (disc)
-        {
-            /* TCP 서버가 못 떴어도 탐색에는 답해야 한다 - 오히려 그때가 PC가 장비를 찾아야 하는 상황이다 */
-            discover_wait(disc, (int)remaining_ms);
-        }
-        else
-        {
-            struct timespec sleep_ts = { remaining_ms / 1000, (remaining_ms % 1000) * 1000000L };
-            nanosleep(&sleep_ts, NULL);
+            log_msg("이벤트 루프 대기 오류 - 잠시 쉬었다 계속한다");
+            struct timespec pause_ts = { 0, 100 * 1000000L };
+            nanosleep(&pause_ts, NULL);
         }
     }
 
+    if (housekeeping_fd >= 0)
+    {
+        loop_remove(loop, housekeeping_fd);
+        close(housekeeping_fd);
+    }
+    loop_destroy(loop);
     discover_shutdown(disc);
     net_shutdown(net);
     db_close(db);

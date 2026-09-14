@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
@@ -14,6 +15,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/timerfd.h>
 
 /*
  * HAL 모의(mock) 구현체.
@@ -25,7 +27,7 @@
  *   echo "door open"      > acud_mock.fifo   # 도어 접점 = 열림
  *   echo "auto on"        > acud_mock.fifo   # 더미 카드 자동 순회(예전 동작) 켜기
  *
- * 예전에는 hal_read_card()가 호출될 때마다(2초 주기) 무조건 더미 카드를 태그한 것처럼 굴었는데,
+ * 예전에는 hal_read_card()가 호출될 때마다(당시 2초 주기) 무조건 더미 카드를 태그한 것처럼 굴었는데,
  * 그러면 상위 시스템과 통신을 테스트하는 동안 이벤트 큐(32개)가 1분 남짓이면 가득 차 버려
  * 무엇을 보고 있는지 알 수 없었다. 그래서 주입식으로 바꾸고, 예전 동작은 "auto on"으로 남겨 뒀다.
  */
@@ -50,7 +52,14 @@ static const char *DUMMY_CARD_IDS[] = {
 #define DUMMY_CARD_COUNT (sizeof(DUMMY_CARD_IDS) / sizeof(DUMMY_CARD_IDS[0]))
 
 static size_t g_card_idx = 0;
-static int    g_auto_mode = 0; /* 1이면 예전처럼 조회할 때마다 더미 카드를 순회한다 */
+
+/*
+ * 더미 카드 자동 순회("auto on"). 예전에는 main이 2초마다 조회할 때 한 장씩 흘려보냈지만,
+ * 이제 조회 주기가 없으므로 **타이머 fd**가 그 역할을 한다. 루프에 함께 걸어 두고
+ * 만료될 때마다 카드 한 장을 큐에 넣는다 - mock 전용 장치다.
+ */
+#define MOCK_AUTO_INTERVAL_SEC 2
+static int g_auto_fd = -1;
 
 static int g_fifo_fd = -1;
 static char   g_line[MOCK_LINE_CAP];
@@ -115,6 +124,26 @@ static int is_card_hex(const char *s)
     return 1;
 }
 
+/* 자동 순회 타이머를 켜거나 끈다 (it_value가 0이면 정지) */
+static void set_auto_timer(int on)
+{
+    if (g_auto_fd < 0)
+    {
+        return;
+    }
+    struct itimerspec its;
+    memset(&its, 0, sizeof(its));
+    if (on)
+    {
+        its.it_value.tv_sec = MOCK_AUTO_INTERVAL_SEC;
+        its.it_interval.tv_sec = MOCK_AUTO_INTERVAL_SEC;
+    }
+    if (timerfd_settime(g_auto_fd, 0, &its, NULL) != 0)
+    {
+        log_msg("HAL(mock): 자동 순회 타이머 설정 실패");
+    }
+}
+
 /*
  * 카드가 아닌 명령을 처리한다. 반환: 1=처리함, 0=모르는 명령.
  * (main.c는 아직 Exit 버튼을 판정 흐름에 쓰지 않지만, 센서 상태 주입 경로는 미리 열어 둔다)
@@ -140,8 +169,9 @@ static int handle_command(const char *line)
     }
     if (strcmp(line, "auto on") == 0 || strcmp(line, "auto off") == 0)
     {
-        g_auto_mode = (strcmp(line, "auto on") == 0);
-        snprintf(msg, sizeof(msg), "HAL(mock): 더미 카드 자동 순회 = %s", g_auto_mode ? "켜짐" : "꺼짐");
+        int on = (strcmp(line, "auto on") == 0);
+        set_auto_timer(on);
+        snprintf(msg, sizeof(msg), "HAL(mock): 더미 카드 자동 순회 = %s", on ? "켜짐" : "꺼짐");
         log_msg(msg);
         return 1;
     }
@@ -234,6 +264,16 @@ int hal_init(void)
         return 0;
     }
 
+    /*
+     * 자동 순회용 타이머. "auto on"이 오기 전에는 멈춰 있지만(만료 없음) fd 자체는 미리 만들어
+     * 루프에 등록해 둔다 - 루프에 fd를 나중에 얹는 경로를 mock 때문에 만들 이유가 없다.
+     */
+    g_auto_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (g_auto_fd < 0)
+    {
+        log_msg("HAL(mock): 자동 순회 타이머 생성 실패 - \"auto on\"은 동작하지 않는다");
+    }
+
     char msg[400];
     snprintf(msg, sizeof(msg),
              "HAL(mock) 초기화 - 실제 리더기 없음. 테스트 입력은 %s 로 주입", g_fifo_path);
@@ -255,29 +295,75 @@ void hal_shutdown(void)
         close(g_fifo_fd);
         g_fifo_fd = -1;
     }
+    if (g_auto_fd >= 0)
+    {
+        close(g_auto_fd);
+        g_auto_fd = -1;
+    }
     unlink(g_fifo_path);
 }
 
-int hal_read_card(char *out_card_id, size_t out_len)
+/*
+ * 감시할 입력 fd 목록.
+ * mock은 카드 주입 FIFO와 자동 순회 타이머 둘뿐이고, 둘 다 **RRU 1번**에서 온 것으로 친다.
+ * 6단계에서는 여기가 RRU 1~7의 USB fd 배열이 된다 (자리는 HAL_RRU_MAX로 잡아 두었다).
+ */
+int hal_input_fds(int out[HAL_INPUT_FD_MAX])
 {
-    drain_fifo();
-
-    if (g_cards_count > 0)
+    int n = 0;
+    if (g_fifo_fd >= 0)
     {
-        snprintf(out_card_id, out_len, "%s", g_cards[g_cards_head]);
-        g_cards_head = (g_cards_head + 1) % MOCK_CARD_QUEUE_CAP;
-        g_cards_count--;
-        return 1;
+        out[n++] = g_fifo_fd;
+    }
+    if (g_auto_fd >= 0)
+    {
+        out[n++] = g_auto_fd;
+    }
+    return n;
+}
+
+void hal_service_fd(int fd)
+{
+    if (fd >= 0 && fd == g_fifo_fd)
+    {
+        drain_fifo();
+        return;
+    }
+    if (fd >= 0 && fd == g_auto_fd)
+    {
+        /* 만료 횟수를 읽어 비워야 select가 계속 깨어나지 않는다 */
+        uint64_t expirations = 0;
+        if (read(g_auto_fd, &expirations, sizeof(expirations)) != (ssize_t)sizeof(expirations))
+        {
+            return;
+        }
+        while (expirations-- > 0)
+        {
+            push_card(DUMMY_CARD_IDS[g_card_idx]);
+            g_card_idx = (g_card_idx + 1) % DUMMY_CARD_COUNT;
+        }
+    }
+}
+
+int hal_read_card(int *out_rru, char *out_card_id, size_t out_len)
+{
+    /*
+     * 큐에서 꺼내기만 한다. 읽기는 hal_service_fd()가 이미 했다 -
+     * 여기서 다시 읽으면 fd를 두 곳에서 소비하게 된다.
+     */
+    if (g_cards_count == 0)
+    {
+        return 0;
     }
 
-    if (g_auto_mode)
+    snprintf(out_card_id, out_len, "%s", g_cards[g_cards_head]);
+    g_cards_head = (g_cards_head + 1) % MOCK_CARD_QUEUE_CAP;
+    g_cards_count--;
+    if (out_rru)
     {
-        snprintf(out_card_id, out_len, "%s", DUMMY_CARD_IDS[g_card_idx]);
-        g_card_idx = (g_card_idx + 1) % DUMMY_CARD_COUNT;
-        return 1;
+        *out_rru = 1; /* mock은 RRU 1번 하나뿐이다 */
     }
-
-    return 0; /* 주입된 카드 없음 */
+    return 1;
 }
 
 int hal_open_door(int seconds)
