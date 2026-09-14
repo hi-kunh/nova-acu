@@ -22,3 +22,5 @@ __pycache__/
 *.swp
 .DS_Store
 acud/events_bench
+acud/users_bench
+acud/users_test

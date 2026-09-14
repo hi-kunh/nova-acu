@@ -18,6 +18,7 @@
 #include "config.h"
 #include "loop.h"
 #include "events.h"
+#include "users.h"
 #include "net.h"
 #include "discover.h"
 #include "protocol.h"
@@ -86,11 +87,30 @@ static void apply_module_layout(AcuNet *net, const AcuConfig *cfg)
  * 콜백은 user 포인터 하나만 받으므로 함께 봐야 하는 것을 여기 담아 넘긴다.
  */
 typedef struct {
-    sqlite3          *db;
+    sqlite3          *db;      /* 설정 — 유효기간·시간대 그룹 */
+    AcuUsers         *users;   /* 사용자 명단 */
     AcuNet           *net;
     AcuDiscover      *disc;
     const AcuConfig  *cfg;
 } AcuRuntime;
+
+/*
+ * db_path가 있는 디렉터리에 name 파일을 둔다.
+ * 두 DB를 따로 백업·이관하는 일이 없게 같은 디렉터리에 모은다.
+ */
+static void path_next_to_db(char *out, size_t out_len, const AcuConfig *cfg, const char *name)
+{
+    const char *slash = strrchr(cfg->db_path, '/');
+    if (slash)
+    {
+        int dir_len = (int)(slash - cfg->db_path);
+        snprintf(out, out_len, "%.*s/%s", dir_len, cfg->db_path, name);
+    }
+    else
+    {
+        snprintf(out, out_len, "%s", name);
+    }
+}
 
 /*
  * events.db 경로를 정한다. 설정이 비어 있으면 **db_path 옆에** 둔다 —
@@ -104,16 +124,18 @@ static void resolve_events_path(char *out, size_t out_len, const AcuConfig *cfg)
         return;
     }
 
-    const char *slash = strrchr(cfg->db_path, '/');
-    if (slash)
+    path_next_to_db(out, out_len, cfg, "events.db");
+}
+
+/* users.db 경로. 설정이 비어 있으면 db_path 옆에 둔다 */
+static void resolve_users_path(char *out, size_t out_len, const AcuConfig *cfg)
+{
+    if (cfg->users_db_path[0] != '\0')
     {
-        int dir_len = (int)(slash - cfg->db_path);
-        snprintf(out, out_len, "%.*s/events.db", dir_len, cfg->db_path);
+        snprintf(out, out_len, "%s", cfg->users_db_path);
+        return;
     }
-    else
-    {
-        snprintf(out, out_len, "events.db");
-    }
+    path_next_to_db(out, out_len, cfg, "users.db");
 }
 
 /* UDP 탐색 소켓이 읽을 수 있을 때 */
@@ -136,6 +158,26 @@ static int module_addr_for_rru(int rru)
         rru = 1;
     }
     return (rru - 1) * 2 + IDTI_EVENT_ADDR_FIRST_MODULE;
+}
+
+/*
+ * hex 문자열 카드값을 원시 8byte로 바꾼다 (짧으면 뒤를 0으로 채운다).
+ * mock HAL이 사람이 읽는 형식으로 주기 때문에 필요한 변환이다.
+ */
+static void hex_to_card(const char *hex, uint8_t out[ACU_USER_CARD_LEN])
+{
+    memset(out, 0, ACU_USER_CARD_LEN);
+    size_t bytes = strlen(hex) / 2;
+    if (bytes > ACU_USER_CARD_LEN)
+    {
+        bytes = ACU_USER_CARD_LEN;
+    }
+    for (size_t i = 0; i < bytes; i++)
+    {
+        unsigned int v = 0;
+        sscanf(hex + i * 2, "%2x", &v);
+        out[i] = (uint8_t)v;
+    }
 }
 
 /* 지금 문 상태를 읽어 IDTI_DOOR_STATUS_* 로 돌려준다 */
@@ -162,8 +204,8 @@ static void on_card_readable(int fd, unsigned events, void *user)
     for (;;)
     {
         int rru = 1;
-        char card_id[17];
-        int has_card = hal_read_card(&rru, card_id, sizeof(card_id));
+        char card_hex[17];
+        int has_card = hal_read_card(&rru, card_hex, sizeof(card_hex));
         if (has_card == 0)
         {
             break;
@@ -174,12 +216,21 @@ static void on_card_readable(int fd, unsigned events, void *user)
             break;
         }
 
-        CardRecord record;
-        AccessResult result = access_judge(rt->db, card_id, &record);
-        access_log_result(card_id, result);
+        /*
+         * HAL은 아직 카드값을 hex 문자열로 준다(mock FIFO에 사람이 넣는 형식이라).
+         * 저장·이벤트는 규약 원시값을 쓰므로 여기서 8byte로 바꾼다.
+         * 6단계에서 RRU가 프레임으로 원시값을 주면 이 변환은 사라진다.
+         */
+        uint8_t card_id[ACU_USER_CARD_LEN];
+        hex_to_card(card_hex, card_id);
 
-        const char *id_hex = (result == ACCESS_GRANTED) ? record.user_id : card_id;
-        net_push_event(rt->net, result, id_hex, door_status,
+        AcuUserRecord user;
+        AccessResult result = access_judge(rt->users, rt->db, card_id, &user);
+        access_log_result(card_hex, result);
+
+        /* 허용이면 User ID, 거부면 카드값을 싣는다 (IDTi Event Structure의 Access ID 규칙) */
+        const uint8_t *access_id = (result == ACCESS_GRANTED) ? user.user_id : card_id;
+        net_push_event(rt->net, result, access_id, door_status,
                        module_addr_for_rru(rru), IDTI_EVENT_ADDR_FIRST_READER);
 
         if (result == ACCESS_GRANTED)
@@ -346,6 +397,22 @@ int main(int argc, char **argv)
     resolve_events_path(events_path, sizeof(events_path), &cfg);
     AcuEvents *events = events_open(events_path, cfg.events_capacity);
 
+    /* 사용자 명단. 이것 없이는 판정을 할 수 없으므로 실패하면 종료한다 */
+    char users_path[300];
+    resolve_users_path(users_path, sizeof(users_path), &cfg);
+    AcuUsers *users = users_open(users_path);
+    if (!users)
+    {
+        log_msg("사용자 저장 초기화 실패 -> 종료");
+        events_close(events);
+        db_close(db);
+        hal_shutdown();
+        remove(pid_path);
+        log_close();
+        return 1;
+    }
+    users_seed_dummy(users);
+
     AcuNet *net = net_init(cfg.tcp_port); /* 실패해도 net=NULL로 계속 진행 (출입 판정은 네트워크 없이도 동작) */
 
     net_set_inactivity_timeout(net, cfg.inactivity_seconds);
@@ -368,6 +435,7 @@ int main(int argc, char **argv)
         discover_shutdown(disc);
         net_shutdown(net);
         events_close(events);
+        users_close(users);
         db_close(db);
         hal_shutdown();
         remove(pid_path);
@@ -375,7 +443,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    AcuRuntime rt = { db, net, disc, &cfg };
+    AcuRuntime rt = { db, users, net, disc, &cfg };
 
     if (net)
     {
@@ -519,6 +587,7 @@ int main(int argc, char **argv)
     discover_shutdown(disc);
     net_shutdown(net);
     events_close(events); /* net보다 뒤에 - net이 응답을 만들다 말고 저장소를 볼 수 있다 */
+    users_close(users);
     db_close(db);
     hal_shutdown();
     remove(pid_path);

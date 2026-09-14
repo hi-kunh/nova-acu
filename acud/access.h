@@ -2,6 +2,7 @@
 #define ACU_ACCESS_H
 
 #include "db.h"
+#include "users.h"
 
 /*
  * 출입 판정 결과.
@@ -19,12 +20,18 @@ typedef enum {
 } AccessResult;
 
 /*
- * card_id로 DB를 조회하여 출입 판정을 내린다.
- * 조회에 성공한 경우 out_record에 카드 정보를 채운다 (판정 결과와 무관하게).
+ * 카드값(원시 8byte)으로 출입 판정을 내린다.
+ *
+ * users: 사용자 명단(`users.db`) — 카드 -> 사용자를 찾는다
+ * db   : 설정(`acud.db`) — 유효기간·시간대 **그룹 정의**가 있다.
+ *        사용자는 그룹 번호만 들고 있고 그룹의 내용은 장치 설정이라 저장소가 다르다.
+ * 찾은 경우 out_user에 사용자 레코드를 채운다 (판정 결과와 무관하게).
  */
-AccessResult access_judge(sqlite3 *db, const char *card_id, CardRecord *out_record);
+AccessResult access_judge(AcuUsers *users, sqlite3 *db,
+                          const uint8_t card_id[ACU_USER_CARD_LEN],
+                          AcuUserRecord *out_user);
 
-/* 판정 결과를 사람이 읽을 수 있는 한 줄 로그로 남긴다. */
-void access_log_result(const char *card_id, AccessResult result);
+/* 판정 결과를 사람이 읽을 수 있는 한 줄 로그로 남긴다 (card_hex는 표시용) */
+void access_log_result(const char *card_hex, AccessResult result);
 
 #endif /* ACU_ACCESS_H */

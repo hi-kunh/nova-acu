@@ -14,6 +14,7 @@ typedef struct {
      * 사용자 DB는 수십만 건을 통째로 교체하는 쓰기, 이벤트는 한 건씩 계속 붙는 쓰기라
      * 성격이 다르고, 이벤트 링 삭제가 사용자 DB 쪽을 붙잡으면 안 된다.
      */
+    char users_db_path[256];  /* 사용자 명단(users.h). 빈 문자열이면 db_path 옆에 users.db */
     char events_db_path[256]; /* 빈 문자열이면 db_path 옆에 events.db */
     long long events_capacity; /* 보관 최대 건수. 넘으면 오래된 것부터 지운다 */
     int  events_batch_size;   /* 한 응답에 실을 최대 이벤트 수 (DM 권고 200~500) */

@@ -3,9 +3,11 @@
 
 #include <stdio.h>
 
-AccessResult access_judge(sqlite3 *db, const char *card_id, CardRecord *out_record)
+AccessResult access_judge(AcuUsers *users, sqlite3 *db,
+                          const uint8_t card_id[ACU_USER_CARD_LEN],
+                          AcuUserRecord *out_user)
 {
-    int rc = db_lookup_card(db, card_id, out_record);
+    int rc = users_lookup_by_card(users, card_id, out_user);
 
     if (rc < 0)
     {
@@ -15,12 +17,12 @@ AccessResult access_judge(sqlite3 *db, const char *card_id, CardRecord *out_reco
     {
         return ACCESS_DENIED_NOT_FOUND;
     }
-    if (!out_record->is_enabled)
+    if (!(out_user->access_option & ACU_USER_OPT_ENABLE))
     {
         return ACCESS_DENIED_DISABLED;
     }
 
-    int valid = db_check_validation(db, out_record->validation_code);
+    int valid = db_check_validation(db, out_user->validation_code);
     if (valid < 0)
     {
         return ACCESS_DENIED_DB_ERROR;
@@ -30,7 +32,7 @@ AccessResult access_judge(sqlite3 *db, const char *card_id, CardRecord *out_reco
         return ACCESS_DENIED_VALIDATION;
     }
 
-    int in_timezone = db_check_timezone(db, out_record->timezone_code);
+    int in_timezone = db_check_timezone(db, out_user->timezone_code);
     if (in_timezone < 0)
     {
         return ACCESS_DENIED_DB_ERROR;
@@ -43,7 +45,7 @@ AccessResult access_judge(sqlite3 *db, const char *card_id, CardRecord *out_reco
     return ACCESS_GRANTED;
 }
 
-void access_log_result(const char *card_id, AccessResult result)
+void access_log_result(const char *card_hex, AccessResult result)
 {
     char line[128];
     const char *reason;
@@ -59,6 +61,6 @@ void access_log_result(const char *card_id, AccessResult result)
         default:                      reason = "거부 (알 수 없는 사유)"; break;
     }
 
-    snprintf(line, sizeof(line), "카드 판정 [%s] -> %s", card_id, reason);
+    snprintf(line, sizeof(line), "카드 판정 [%s] -> %s", card_hex, reason);
     log_msg(line);
 }

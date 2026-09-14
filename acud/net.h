@@ -1,6 +1,8 @@
 #ifndef ACU_NET_H
 #define ACU_NET_H
 
+#include <stdint.h>
+
 #include "access.h"
 #include "loop.h"
 #include "events.h"
@@ -65,13 +67,15 @@ void net_check_inactivity(AcuNet *net);
 
 /*
  * 출입 판정 결과를 IDTi Event Log(History, Object 0x01)로 상위 시스템에 보고할 큐에 넣는다.
- * id_hex: 허용 시 User ID, 거부 시 Card ID (IDTi Event Structure의 Access ID 규칙과 동일), 16자 hex 문자열.
+ * access_id: 허용 시 User ID, 거부 시 Card ID (IDTi Event Structure의 Access ID 규칙과 동일).
+ *   **원시 8byte** — 규약의 표현 그대로다. 예전에는 hex 문자열로 들고 다녔는데, 사용자 저장을
+ *   규약 원시값으로 바꾸면서 중간에 문자열로 바꿨다 되돌리는 단계를 없앴다.
  * door_status: IDTI_DOOR_STATUS_* 값 (판정 시점의 문 상태).
  * module_addr / reader_addr: 이벤트 주소(Event Structure byte 6·7). **1부터** 세고 DM이 원시값을
  *   그대로 화면에 쓴다. 카드가 올라온 RRU·리더에서 계산한다 (HARDWARE.md "이벤트 주소").
  * DB 오류(ACCESS_DENIED_DB_ERROR)는 상위 시스템에 보고할 실질적 의미가 없어 무시한다.
  */
-void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status,
+void net_push_event(AcuNet *net, AccessResult result, const uint8_t *access_id, int door_status,
                     int module_addr, int reader_addr);
 
 /* 상위 시스템이 지금 붙어 있는지 (netmodule IMIN의 Connect 필드에 실린다). net이 NULL이면 0 */

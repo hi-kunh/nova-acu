@@ -298,25 +298,7 @@ static uint32_t event_code_for_result(AccessResult result)
     }
 }
 
-/* "0011...FF" 형태의 hex 문자열을 raw byte로 변환한다 (out_len을 넘는 부분은 버림) */
-static void hex_to_bytes(const char *hex, uint8_t *out, size_t out_len)
-{
-    memset(out, 0, out_len);
-    size_t hex_len = strlen(hex);
-    size_t byte_count = hex_len / 2;
-    if (byte_count > out_len)
-    {
-        byte_count = out_len;
-    }
-    for (size_t i = 0; i < byte_count; i++)
-    {
-        unsigned int v = 0;
-        sscanf(hex + i * 2, "%2x", &v);
-        out[i] = (uint8_t)v;
-    }
-}
-
-void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int door_status,
+void net_push_event(AcuNet *net, AccessResult result, const uint8_t *access_id, int door_status,
                     int module_addr, int reader_addr)
 {
     if (!net || result == ACCESS_DENIED_DB_ERROR)
@@ -342,7 +324,7 @@ void net_push_event(AcuNet *net, AccessResult result, const char *id_hex, int do
     e.door_status = (uint8_t)door_status;
     e.func_code = IDTI_FUNC_NONE;
     e.ts = time(NULL);
-    hex_to_bytes(id_hex, e.id, sizeof(e.id));
+    memcpy(e.id, access_id, sizeof(e.id));
 
     if (events_append(net->events, &e) != 0)
     {

@@ -1572,6 +1572,89 @@ Object 번호가 하루치 로그에 그대로 있었다.
 설명도 그대로 맞았다. 회신 문서 5절을 "번호를 알려 달라"에서 **"이 번호들이 맞는지 확인해 달라"**로 바꿨다.
 추정으로 채우지 않는 이유는 규약 문서에서 골랐다가 틀린 전례가 있어서다(`mType 123` 등).
 
+### 2026-09-14 (월, 오후) — 사용자 저장 `users.db`
+
+1단계에 만든 `cards` 표는 판정 로직을 확인하려고 급히 만든 것이라 규약과 모양이 달랐다
+(hex 문자열 카드번호, 필드 6개). DM이 내려보내는 것은 `3. IDTi Protocol Member(User DB) Structure`의
+레코드라, 그대로 받아 두지 않으면 되돌려 줄 때(`UserReceive`) 값이 달라진다.
+
+#### 스키마 — 규약 필드 그대로
+
+`isldev\clsDevUser.cs`의 `lengthUserInfo*Byte`를 그대로 옮겼다 (합이 User Info 32byte).
+
+```
+User Info 32 = UserID 8 + GeneralGroup 1 + Reserved 1 + RevisionID 2 + AccessOption 4
+             + Level 1 + Validation 2 + Timezone 2 + ExpiredDate 3 + ProxType 1
+             + ProxWiegand 1 + BioType 1 + BioTypeSub 1 + TemplateCount 1
+             + AccessPassword 2 + CanteenCode 1
+  + LCD Initials 16 + Proximity 32 + Restriction 16 + Group 16  =  카드 사용자 112byte
+```
+
+- `user_id`는 **BLOB 8byte** — 규약 원시값이다. 문자열로 바꿔 두면 표현이 갈린다(예전 `cards`가 그랬다)
+- **카드는 `user_cards`라는 인증 수단 표로 뺐다.** 사용자 ID 중심이라 나중에 지문·안면을
+  같은 모양(수단값 → 사용자 ID)으로 붙일 수 있다 (HARDWARE.md "확장 고려")
+- 유효기간·시간대 **그룹 정의는 `acud.db`에 남는다** — 사용자는 그룹 번호만 들고 있고,
+  그룹의 내용은 장치 설정이다. `db.c`에서 `cards` 표와 `db_lookup_card()`는 지웠다
+
+#### AccessOption의 Enable 비트 — 소스에서 유도
+
+`clsDevUser.cs`는 `boolArray[31] = AccessOptionIsEnable`로 쓰고,
+`clsDevCommon.CalcBoolArrayToByte`가 8개씩 묶어 **바이트 순서를 뒤집어**(`retVal.Length - i - 1`) 담는다.
+⇒ 인덱스 31은 4byte 중 **첫 바이트의 최상위 비트**, 빅엔디언 정수로 `0x80000000`.
+
+⚠ **소스에서 유도한 값이라 DM에 사용자 레코드 원시 바이트를 요청해 확인해야 한다.**
+지금은 mock 데이터라 양쪽이 같은 정의를 써서 문제가 없지만, 실제 DM 다운로드를 붙일 때 가장 먼저 볼 값이다.
+
+#### 전체 다운로드 — 새 표에 받아 한 번에 교체
+
+```
+users_load_begin()   users_load / user_cards_load 표를 만든다
+users_load_put()     5,000명마다 커밋 (1명씩 커밋하면 26만 명에 한 시간)
+users_load_commit()  BEGIN; DROP users; ALTER users_load RENAME TO users; ... COMMIT;
+users_load_abort()   받던 표를 버린다 — 기존 명단은 그대로
+```
+
+- **받는 동안에도 기존 명단으로 출입 판정이 계속된다** (DM이 26만 명을 1분 넘게 보낸다)
+- 교체가 한 트랜잭션이라 중간에 정전이 나도 **반쪽 명단이 남지 않는다**
+- 교체는 옛 표를 DROP 하므로 준비된 SQL을 먼저 정리하고 뒤에 다시 준비한다
+- 시작할 때 지난번 받다 만 표가 있으면 버린다
+
+`synchronous`는 이벤트와 달리 **NORMAL**이다. 사용자 명단은 **원본이 DM에 있어 다시 받을 수 있고**,
+26만 명을 받는 동안 커밋마다 fsync를 걸면 다운로드가 그만큼 길어진다. (이벤트는 FULL — "이벤트 저장" 절)
+
+#### 실측 — `tools/users_bench.c` (`make -C acud usersbench`)
+
+26만 명(SSC-334 장비 사양) 기준. DM 운영 한도는 10만 명이라 실제로는 이보다 짧다.
+
+| | 개발 PC (NVMe) | **보드 (eMMC)** |
+|---|---|---|
+| 전체 다운로드 받기 | 1.21초 (0.005ms/명) | **64.2초 (0.247ms/명, 초당 4,053명)** |
+| 표 교체 | 0.06초 | 1.41초 |
+| **합계** | 1.27초 | **65.6초** |
+| 카드 조회 (판정) | 0.0039ms | **0.0808ms** |
+| 미등록 카드 조회 | 0.0010ms | 0.0228ms |
+| 개별 등록 (UserSend) | 0.009ms | 0.166ms |
+| 파일 크기 | 47MB | 47MB |
+
+- **9/11에 Python으로 잰 "1명씩 커밋 13.6ms/명 → 26만 명 1시간"이 65초가 됐다**
+- 판정은 기존 장비 사양(`사용자 확인소요 시간 0.5~1Sec`)의 **1만 배 빠르다**
+- 10만 명(DM 한도)이면 다운로드가 약 25초
+
+#### 확인 — `tools/users_test.c` (`make -C acud userstest`)
+
+전체 다운로드의 어려운 부분만 골라 22가지를 본다. **개발 PC·보드 모두 전부 통과.**
+
+```
+[2] 받는 중        받는 동안에도 기존 카드로 판정된다 / 새 사용자는 아직 안 보인다
+[3] 중단           기존 명단 그대로, 받던 것은 사라진다
+[4] 교체           새 명단이 보이고 옛 사용자는 사라진다
+[5] 교체 뒤        개별 등록·삭제가 된다 (준비된 SQL 재준비 확인)
+                   사용자를 지우면 그 사람 카드도 함께 지워진다
+```
+
+판정 6경로(허용·비활성·미등록·유효기간·시간대·허용)는 바꾸기 전과 같은 결과다.
+이벤트 Access ID도 그대로 — 허용이면 User ID(`0000000000000001`), 거부면 카드값.
+
 ## 빌드 & 실행
 
 ```bash

@@ -7,14 +7,6 @@
 #include <time.h>
 
 static const char *SCHEMA_SQL =
-    "CREATE TABLE IF NOT EXISTS cards ("
-    "    card_id         TEXT PRIMARY KEY,"
-    "    user_id         TEXT NOT NULL,"
-    "    is_enabled      INTEGER NOT NULL DEFAULT 1,"
-    "    level           INTEGER NOT NULL DEFAULT 0,"
-    "    validation_code INTEGER NOT NULL DEFAULT 0,"
-    "    timezone_code   INTEGER NOT NULL DEFAULT 0"
-    ");"
     /* IDTi Validation ID(1~1024) 대응: 유효기간 그룹 하나당 시작일~종료일 한 세트 */
     "CREATE TABLE IF NOT EXISTS validations ("
     "    validation_id INTEGER PRIMARY KEY,"
@@ -70,28 +62,22 @@ void db_close(sqlite3 *db)
 void db_seed_dummy_data(sqlite3 *db)
 {
     /*
-     * 테스트용 더미 카드 5장으로 판정 경로를 모두 검증한다:
-     *   1. 활성 + 제한없음(0,0)                         -> 허용
-     *   2. 비활성화                                      -> 거부 (비활성)
-     *   3. 활성 + 유효기간(validation_id=1, 2020년) 만료  -> 거부 (유효기간)
-     *   4. 활성 + 유효기간/시간대(validation_id=2, timezone_id=1) 모두 통과 -> 허용
-     *   5. 활성 + 시간대(timezone_id=2, 요일 전부 미선택) 불일치           -> 거부 (시간대)
+     * 테스트용 **그룹 정의**만 채운다. 사용자(카드)는 `users.db`로 옮겼고
+     * 더미 사용자는 `users_seed_dummy()`가 넣는다 — 그쪽 5명이 아래 그룹을 가리킨다.
+     *
+     *   validation 1 : 2020년 (이미 만료)          -> 거부 (유효기간)
+     *   validation 2 : 작년~내년                    -> 통과
+     *   timezone   1 : 모든 요일 · 하루 종일        -> 항상 허용
+     *   timezone   2 : 어떤 요일도 선택 안 됨       -> 항상 불일치
      */
     static const char *SEED_SQL =
-        "INSERT OR IGNORE INTO cards (card_id, user_id, is_enabled, level, validation_code, timezone_code) VALUES"
-        "  ('04A1B2C3D4E5F600', '0000000000000001', 1, 1, 0, 0),"
-        "  ('AABBCCDD11223300', '0000000000000002', 0, 1, 0, 0),"
-        "  ('1122334455667700', '0000000000000003', 1, 1, 1, 0),"
-        "  ('2233445566778800', '0000000000000004', 1, 1, 2, 1),"
-        "  ('3344556677889900', '0000000000000005', 1, 1, 0, 2);"
-
         "INSERT OR IGNORE INTO validations (validation_id, start_date, end_date) VALUES"
         "  (1, '2020-01-01', '2020-12-31'),"
         "  (2, date('now','localtime','-1 year'), date('now','localtime','+1 year'));"
 
         "INSERT OR IGNORE INTO timezones (timezone_id, slot_index, start_hour, start_min, end_hour, end_min, week_select) VALUES"
-        "  (1, 0, 0, 0, 23, 59, 0xFFFF),"  /* 모든 요일/공휴일 + 하루 종일 -> 항상 허용 */
-        "  (2, 0, 0, 0, 23, 59, 0x0000);"; /* 어떤 요일도 선택 안 됨 -> 항상 불일치 */
+        "  (1, 0, 0, 0, 23, 59, 0xFFFF),"
+        "  (2, 0, 0, 0, 23, 59, 0x0000);";
 
     char *err = NULL;
     if (sqlite3_exec(db, SEED_SQL, NULL, NULL, &err) != SQLITE_OK)
@@ -99,48 +85,6 @@ void db_seed_dummy_data(sqlite3 *db)
         fprintf(stderr, "더미 데이터 삽입 실패: %s\n", err);
         sqlite3_free(err);
     }
-}
-
-int db_lookup_card(sqlite3 *db, const char *card_id, CardRecord *out)
-{
-    static const char *SQL =
-        "SELECT card_id, user_id, is_enabled, level, validation_code, timezone_code "
-        "FROM cards WHERE card_id = ?;";
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, SQL, -1, &stmt, NULL) != SQLITE_OK)
-    {
-        fprintf(stderr, "조회 준비 실패: %s\n", sqlite3_errmsg(db));
-        return -1;
-    }
-
-    sqlite3_bind_text(stmt, 1, card_id, -1, SQLITE_STATIC);
-
-    int rc = sqlite3_step(stmt);
-    int result;
-
-    if (rc == SQLITE_ROW)
-    {
-        snprintf(out->card_id, sizeof(out->card_id), "%s", (const char *)sqlite3_column_text(stmt, 0));
-        snprintf(out->user_id, sizeof(out->user_id), "%s", (const char *)sqlite3_column_text(stmt, 1));
-        out->is_enabled      = sqlite3_column_int(stmt, 2);
-        out->level           = sqlite3_column_int(stmt, 3);
-        out->validation_code = sqlite3_column_int(stmt, 4);
-        out->timezone_code   = sqlite3_column_int(stmt, 5);
-        result = 1;
-    }
-    else if (rc == SQLITE_DONE)
-    {
-        result = 0; /* 조회 결과 없음 */
-    }
-    else
-    {
-        fprintf(stderr, "조회 실패: %s\n", sqlite3_errmsg(db));
-        result = -1;
-    }
-
-    sqlite3_finalize(stmt);
-    return result;
 }
 
 int db_check_validation(sqlite3 *db, int validation_code)

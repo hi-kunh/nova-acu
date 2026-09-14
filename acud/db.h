@@ -4,17 +4,11 @@
 #include <sqlite3.h>
 
 /*
- * cards 테이블 한 행을 담는 구조체.
- * IDTi User Info(32byte)의 필드 중 카드 출입 판정에 필요한 부분만 반영한다.
+ * 설정 저장 (`acud.db`) — 유효기간·시간대 **그룹 정의**.
+ *
+ * 사용자(카드)는 여기 없다. 규약 필드를 그대로 담아야 하고 수십만 건을 통째로 교체하므로
+ * `users.db`(users.h)로 따로 뺐다. 이 파일에는 **장치 설정**만 남는다.
  */
-typedef struct {
-    char card_id[17];    /* 카드 ID (hex 문자열, IDTi User ID(8byte)를 hex 16자로 표현) */
-    char user_id[17];    /* 사용자 ID (hex 문자열) */
-    int  is_enabled;     /* User Option bitflag 중 Enable 여부 (0/1) */
-    int  level;          /* Level(1) */
-    int  validation_code;/* Validation Code(2): 유효기간 그룹 (0=제한없음, validations 테이블 참조) */
-    int  timezone_code;  /* Timezone Code(2): 출입 가능 시간대 그룹 (0=제한없음, timezones 테이블 참조) */
-} CardRecord;
 
 /* DB 파일을 열고 스키마가 없으면 생성한다. 실패 시 NULL 반환. */
 sqlite3 *db_open(const char *path);
@@ -22,14 +16,8 @@ sqlite3 *db_open(const char *path);
 /* DB 핸들을 닫는다. db가 NULL이어도 안전. */
 void db_close(sqlite3 *db);
 
-/* 테스트 단계용: 더미 카드 데이터를 없을 때만 채워 넣는다. */
+/* 테스트 단계용: 더미 그룹 정의를 없을 때만 채워 넣는다 (사용자는 users_seed_dummy) */
 void db_seed_dummy_data(sqlite3 *db);
-
-/*
- * card_id로 카드를 조회한다.
- * 찾으면 out에 채우고 1, 못 찾으면 0, 오류면 -1을 반환한다.
- */
-int db_lookup_card(sqlite3 *db, const char *card_id, CardRecord *out);
 
 /*
  * validation_code(유효기간 그룹, IDTi Validation ID)를 확인한다.

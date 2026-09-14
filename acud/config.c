@@ -45,6 +45,7 @@
  * 1,000만 건은 36byte 이벤트 기준 SQLite 오버헤드까지 대략 1GB 안쪽이다.
  * 묶음 200건은 DM 권고 구간(200~500)의 아래쪽 — 폴링 3초면 분당 4,000건이다.
  */
+#define ACU_DEFAULT_USERS_DB_PATH ""
 #define ACU_DEFAULT_EVENTS_DB_PATH ""
 #define ACU_DEFAULT_EVENTS_CAPACITY 10000000LL
 #define ACU_DEFAULT_EVENTS_BATCH 200
@@ -75,6 +76,7 @@ void config_set_defaults(AcuConfig *cfg)
     cfg->module_alarm_fire_inputs = IDTI_MODULE_DEFAULT_ALARM_FIRE_INPUTS;
     cfg->module_type = ACU_DEFAULT_MODULE_TYPE;
     cfg->module_install_type = ACU_DEFAULT_MODULE_INSTALL_TYPE;
+    snprintf(cfg->users_db_path, sizeof(cfg->users_db_path), "%s", ACU_DEFAULT_USERS_DB_PATH);
     snprintf(cfg->events_db_path, sizeof(cfg->events_db_path), "%s", ACU_DEFAULT_EVENTS_DB_PATH);
     cfg->events_capacity = ACU_DEFAULT_EVENTS_CAPACITY;
     cfg->events_batch_size = ACU_DEFAULT_EVENTS_BATCH;
@@ -285,7 +287,18 @@ int config_load(const char *path, AcuConfig *cfg)
     cfg->module_alarm_fire_inputs =
         read_int_field(root, "module_alarm_fire_inputs", 0, IDTI_MODULE_IO_SLOTS,
                        IDTI_MODULE_DEFAULT_ALARM_FIRE_INPUTS);
-    /* 이벤트 저장. 경로는 빈 문자열 자체가 "db_path 옆에 둔다"는 유효한 값이다 */
+    /* 사용자·이벤트 저장 경로. 빈 문자열 자체가 "db_path 옆에 둔다"는 유효한 값이다 */
+    const cJSON *users_db_path = cJSON_GetObjectItemCaseSensitive(root, "users_db_path");
+    if (cJSON_IsString(users_db_path))
+    {
+        snprintf(cfg->users_db_path, sizeof(cfg->users_db_path), "%s", users_db_path->valuestring);
+    }
+    else
+    {
+        snprintf(cfg->users_db_path, sizeof(cfg->users_db_path), "%s", ACU_DEFAULT_USERS_DB_PATH);
+    }
+
+
     const cJSON *events_db_path = cJSON_GetObjectItemCaseSensitive(root, "events_db_path");
     if (cJSON_IsString(events_db_path))
     {
@@ -293,7 +306,8 @@ int config_load(const char *path, AcuConfig *cfg)
     }
     else
     {
-        snprintf(cfg->events_db_path, sizeof(cfg->events_db_path), "%s", ACU_DEFAULT_EVENTS_DB_PATH);
+        snprintf(cfg->users_db_path, sizeof(cfg->users_db_path), "%s", ACU_DEFAULT_USERS_DB_PATH);
+    snprintf(cfg->events_db_path, sizeof(cfg->events_db_path), "%s", ACU_DEFAULT_EVENTS_DB_PATH);
     }
 
     const cJSON *events_capacity = cJSON_GetObjectItemCaseSensitive(root, "events_capacity");
