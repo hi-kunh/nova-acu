@@ -1496,11 +1496,28 @@ static int handle_setting_write(AcuNet *net, const IdtiHeader *hdr, const uint8_
     uint8_t ack = why ? IDTI_ACK_FAIL : IDTI_ACK_SUCCESS;
     send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
 
-    char line[220];
+    char line[520];
     if (why)
     {
-        snprintf(line, sizeof(line), "네트워크: %s 쓰기 (모듈 %d, 칸 %d) -> Fail (%s)",
-                 spec->name, module, display_slot(module, slot), why);
+        /*
+         * 실패하면 **받은 그대로** 남긴다 — 길이·주소·데이터 앞부분.
+         * 9/15에 DM의 카드리더 쓰기가 "데이터가 짧다"로 실패했는데, 기대 크기(SDK 합 32byte)만 있고
+         * 실제로 몇 byte가 왔는지 알 수 없었다. 형식을 맞추려면 실물이 필요하다.
+         */
+        const uint8_t *d = hdr->dest_addr;
+        char hex[3 * 48 + 1];
+        size_t shown = hdr->data_len < 48 ? hdr->data_len : 48;
+        for (size_t i = 0; i < shown; i++)
+        {
+            snprintf(hex + i * 2, 3, "%02x", data[i]);
+        }
+        hex[shown * 2] = '\0';
+        snprintf(line, sizeof(line),
+                 "네트워크: %s 쓰기 -> Fail (%s) - 받은 데이터 %zubyte(기대 %zu) 모듈=%u 비트맵=%02x%02x%02x%02x 데이터=%s%s",
+                 spec->name, why, hdr->data_len, spec->len, d[IDTI_DEST_MODULE_IDX],
+                 d[IDTI_DEST_BITMAP_IDX], d[IDTI_DEST_BITMAP_IDX + 1],
+                 d[IDTI_DEST_BITMAP_IDX + 2], d[IDTI_DEST_BITMAP_IDX + 3],
+                 hex, hdr->data_len > shown ? "…" : "");
         log_msg(line);
         return 1;
     }
