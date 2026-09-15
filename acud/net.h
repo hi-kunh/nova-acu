@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "access.h"
+#include <sqlite3.h>
 #include "loop.h"
 #include "events.h"
 #include "userbin.h"
@@ -97,6 +98,12 @@ void net_push_event(AcuNet *net, AccessResult result, const uint8_t *access_id, 
  * module_addr / reader_addr 규칙은 HARDWARE.md "이벤트 주소" 절.
  */
 void net_push_system_event(AcuNet *net, uint32_t event_code, int module_addr, int reader_addr);
+
+/*
+ * 장치 설정(입력·출력·컨트롤러 기본)을 담은 DB를 붙인다 (devset.h).
+ * 설정 조회(Cmd 6 / Sub 2, Obj 0x29·0x2C·0x2D)가 여기서 읽는다. DB를 바꿔 열면 다시 불러야 한다.
+ */
+void net_set_settings_db(AcuNet *net, sqlite3 *db);
 
 /* 지금 강제 개방 상태인지 (Object 206). net이 NULL이면 0 */
 int net_force_open_state(const AcuNet *net);

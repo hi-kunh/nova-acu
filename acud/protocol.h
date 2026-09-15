@@ -121,6 +121,63 @@
  * Data는 **0x01이면 개방, 그 밖의 값이면 복구**다 (규약: "Open : 0x01  Recovery : Not 0x01").
  */
 #define IDTI_OBJ_FORCE_OPEN 0xCE
+
+/*
+ * 장치 설정 오브젝트 — **DM 소스 `DeviceObject` 열거형의 정의값** (2026-09-14 DM 회신 2절).
+ * 조회는 Cmd 6 RequestData / Sub 2 Read.
+ */
+#define IDTI_OBJ_DEVICE          0x29 /*  41 컨트롤러 기본설정 */
+#define IDTI_OBJ_CONTROLLER      0x2B /*  43 컨트롤러 장치설정 */
+#define IDTI_OBJ_INPUT           0x2C /*  44 입력 */
+#define IDTI_OBJ_OUTPUT          0x2D /*  45 출력 */
+#define IDTI_OBJ_CARD_READER     0x2F /*  47 카드리더 */
+#define IDTI_OBJ_ALARM           0x51 /*  81 알람 */
+#define IDTI_OBJ_ALARM_BELL_SCH  0x52 /*  82 알람벨 스케줄 */
+#define IDTI_OBJ_OPMODE_SCH      0x53 /*  83 운영모드 스케줄 */
+#define IDTI_OBJ_DOORMODE_SCH    0x54 /*  84 도어모드 스케줄 */
+#define IDTI_OBJ_GROUP_APPLY     0xA6 /* 166 엑세스그룹 적용 (0x2F와 헷갈렸던 번호) */
+
+/* 설정 데이터 블록 크기 — SSC-324 캡처의 OneDataBlockSize (DM 회신 3절) */
+#define IDTI_DEVICE_BASIS_LEN  13 /* 0x29 */
+#define IDTI_INPUT_SETTING_LEN 21 /* 0x2C */
+#define IDTI_OUTPUT_SETTING_LEN 14 /* 0x2D */
+
+/*
+ * 컨트롤러 기본설정 13byte 배치 (DM 회신 3-1, SSC-324 캡처 `03 21 01 05 FF 00 00 00 00 00 00 00 00`).
+ * Platinum이 보여 주던 `1/5/0`은 Address / OperationMode / Floor였다.
+ */
+#define IDTI_BASIS_OFF_CATEGORY   0
+#define IDTI_BASIS_OFF_TYPE       1
+#define IDTI_BASIS_OFF_ADDRESS    2
+#define IDTI_BASIS_OFF_OPMODE     3
+#define IDTI_BASIS_OFF_LEVEL      4
+#define IDTI_BASIS_OFF_VALIDATION 5 /* 2 */
+#define IDTI_BASIS_OFF_FLOOR      7 /* 2 */
+
+/*
+ * 출력 설정 14byte 배치 (DM 회신 3-3). 알람·화재 릴레이 규칙이 이 두 칸을 본다.
+ *   ActiveType     2 = Alarm인 출력은 보드 전체에서 전부 동작
+ *   IsActiveOption bit7 = 화재로도 동작, bit6 = 협박으로 동작
+ */
+#define IDTI_OUTPUT_OFF_ACTIVE_TYPE   6
+#define IDTI_OUTPUT_OFF_ACTIVE_TIME   7
+#define IDTI_OUTPUT_OFF_ACTIVE_OPTION 10
+#define IDTI_OUTPUT_ACTIVE_TYPE_DOOR  1
+#define IDTI_OUTPUT_ACTIVE_TYPE_ALARM 2
+#define IDTI_OUTPUT_OPTION_BY_FIRE    0x80
+#define IDTI_OUTPUT_OPTION_BY_DURESS  0x40
+
+/*
+ * 요청 헤더에서 **"어느 칸을 묻는가"** 를 꺼낸다 (DM 회신 4절).
+ *
+ *   offset  7~10  AddressDest           마지막 byte(offset 10) = 모듈 번호 (0이면 컨트롤러 자신)
+ *   offset 11~14  AddressDestBroadcast  32비트 비트맵, 켜진 비트 = 대상
+ *
+ * `StartDataBlockIdx`(36~37)는 "몇 개짜리 묶음인가"만 말하고 **몇 번 칸인지는 말하지 않는다.**
+ * IdtiHeader.dest_addr[8]이 offset 7~14를 그대로 담고 있다.
+ */
+#define IDTI_DEST_MODULE_IDX 3 /* dest_addr[3] = offset 10 */
+#define IDTI_DEST_BITMAP_IDX 4 /* dest_addr[4..7] = offset 11~14, 빅엔디언 */
 #define IDTI_FORCE_OPEN_ON  0x01
 
 #define IDTI_EVENT_USERFILE_PARTIAL 0x101D0101u /* 일부 사용자가 등록되지 않음 */

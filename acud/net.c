@@ -7,6 +7,7 @@
 #include "events.h"
 #include "userbin.h"
 #include "usercmd.h"
+#include "devset.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -90,6 +91,9 @@ struct AcuNet {
     int force_open;
     void (*on_force_open)(int on, void *user);
     void *force_open_user;
+
+    /* 장치 설정(입력·출력 등)을 담은 acud.db. NULL이면 설정 조회에 Fail로 답한다 */
+    sqlite3 *settings_db;
 
     /*
      * 붙어 있는 이벤트 루프. 리슨 fd와 클라이언트 fd를 여기에 등록한다.
@@ -408,6 +412,14 @@ void net_push_system_event(AcuNet *net, uint32_t event_code, int module_addr, in
     net_store_event(net, event_code, IDTI_OPMODE_NONE, NULL,
                     net ? net->door_status : IDTI_DOOR_STATUS_NONE,
                     module_addr, reader_addr);
+}
+
+void net_set_settings_db(AcuNet *net, sqlite3 *db)
+{
+    if (net)
+    {
+        net->settings_db = db;
+    }
 }
 
 int net_force_open_state(const AcuNet *net)
@@ -1190,6 +1202,152 @@ static int handle_force_open_request(AcuNet *net, const IdtiHeader *hdr, const u
     return 0;
 }
 
+/*
+ * 요청이 **어느 칸**을 묻는지 꺼낸다 (DM 회신 4절).
+ *   모듈 = AddressDest의 마지막 byte (offset 10)
+ *   칸   = AddressDestBroadcast 비트맵(offset 11~14)에서 켜진 가장 낮은 비트
+ *
+ * ⚠ **비트 번호 = 모듈 14칸 배치의 자리 번호**라는 것은 **추정**이다.
+ * 근거는 SSC-324 캡처 두 표본뿐이다 — 입력 요청 bit2(= 칸 2, 첫 입력), 출력 요청 bit8(= 칸 8, 첫 출력).
+ * 둘 다 `22333333444433` 배치에서 정확히 첫 입력·첫 출력 자리라 우연으로 보기 어렵지만,
+ * DM이 입력 1~16을 훑은 대응표를 주기로 했다. **그 표가 오면 이 함수만 고친다.**
+ *
+ * 반환: 0=성공, -1=비트맵이 비었다
+ */
+static int request_slot(const IdtiHeader *hdr, int *out_module, int *out_slot)
+{
+    const uint8_t *b = hdr->dest_addr + IDTI_DEST_BITMAP_IDX;
+    uint32_t bitmap = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+                      ((uint32_t)b[2] << 8) | b[3];
+
+    *out_module = hdr->dest_addr[IDTI_DEST_MODULE_IDX];
+    if (bitmap == 0)
+    {
+        return -1;
+    }
+
+    int slot = 0;
+    while (!(bitmap & 1u))
+    {
+        bitmap >>= 1;
+        slot++;
+    }
+    *out_slot = slot;
+
+    if (bitmap != 1u)
+    {
+        /* 켜진 비트가 여럿이다 - 캡처에서 본 적이 없어 첫 칸만 답한다 */
+        log_msg("네트워크: 비트맵에 여러 칸이 켜져 있다 - 가장 낮은 칸만 답한다 (형식 미확인)");
+    }
+    return 0;
+}
+
+/* 모듈 14칸 배치에서 이 자리가 입력·출력인지 (`22333333444433`) */
+static int slot_is_input(int slot)  { return (slot >= 2 && slot <= 7) || slot == 12 || slot == 13; }
+static int slot_is_output(int slot) { return slot >= 8 && slot <= 11; }
+
+/* 설정 조회 응답 — SSC-324 캡처와 같은 모양으로 보낸다 */
+static void send_setting_response(AcuNet *net, const IdtiHeader *hdr,
+                                  const uint8_t *data, size_t len)
+{
+    /*
+     * 캡처에서 본 SSC-324 응답 (DM 회신 3·4절):
+     *   Command/Sub  요청 그대로 되돌린다 (06 / 02)  <- 이벤트 응답(05)과 다르다
+     *   StartItemIdx / EndItemIdx = FF FF
+     *   Start/End/Count DataBlock = 1 / 1 / 1
+     *   OneDataBlockSize = 데이터 크기 (41 -> 13, 44 -> 21, 45 -> 14)
+     */
+    IdtiHeader h = *hdr;
+    h.start_item = 0xFF;
+    h.end_item = 0xFF;
+    send_response(net, &h, hdr->command, hdr->sub_command, hdr->object,
+                  data, len, 1, 1, 1, (uint16_t)len);
+}
+
+/*
+ * 장치 설정 조회 (Cmd 6 / Sub 2). 처리했으면 1.
+ *   0x29 컨트롤러 기본설정 13byte
+ *   0x2C 입력 21byte  /  0x2D 출력 14byte — 칸마다 따로 묻는다
+ */
+static int handle_setting_read(AcuNet *net, const IdtiHeader *hdr)
+{
+    if (hdr->command != IDTI_CMD_REQ_DATA || hdr->sub_command != IDTI_SUBCMD_READ)
+    {
+        return 0;
+    }
+    if (hdr->object != IDTI_OBJ_DEVICE && hdr->object != IDTI_OBJ_INPUT &&
+        hdr->object != IDTI_OBJ_OUTPUT)
+    {
+        return 0;
+    }
+
+    uint8_t block[IDTI_INPUT_SETTING_LEN];
+    char line[180];
+
+    if (hdr->object == IDTI_OBJ_DEVICE)
+    {
+        /*
+         * 컨트롤러 기본설정. DM이 바꿔 저장한 것이 있으면 그것을, 없으면 **기본값**을 돌려준다.
+         * 기본값의 종류·타입·주소는 우리 장치 자신이고, OperationMode 5 · Level FF는
+         * **현장 SSC-324 캡처값**이다 (DM 회신 3-1). 이 셋이 없는 컨트롤러는 없으므로
+         * 입력·출력과 달리 "저장된 것 없음"으로 실패시키지 않는다.
+         */
+        int rc = devset_get(net->settings_db, IDTI_OBJ_DEVICE, 0, 0, block, IDTI_DEVICE_BASIS_LEN);
+        if (rc != 1)
+        {
+            memset(block, 0, IDTI_DEVICE_BASIS_LEN);
+            block[IDTI_BASIS_OFF_CATEGORY] = (uint8_t)net->device_category;
+            block[IDTI_BASIS_OFF_TYPE]     = (uint8_t)net->device_type;
+            block[IDTI_BASIS_OFF_ADDRESS]  = 0x01;
+            block[IDTI_BASIS_OFF_OPMODE]   = 0x05; /* SSC-324 캡처값 */
+            block[IDTI_BASIS_OFF_LEVEL]    = 0xFF; /* SSC-324 캡처값 */
+        }
+        send_setting_response(net, hdr, block, IDTI_DEVICE_BASIS_LEN);
+        log_msg(rc == 1 ? "네트워크: 컨트롤러 기본설정 조회 -> 저장값"
+                        : "네트워크: 컨트롤러 기본설정 조회 -> 기본값");
+        return 1;
+    }
+
+    int module = 0, slot = 0;
+    int is_input = (hdr->object == IDTI_OBJ_INPUT);
+    size_t len = is_input ? IDTI_INPUT_SETTING_LEN : IDTI_OUTPUT_SETTING_LEN;
+
+    if (request_slot(hdr, &module, &slot) != 0 ||
+        module < 1 || module > net->layout.module_count ||
+        !(is_input ? slot_is_input(slot) : slot_is_output(slot)))
+    {
+        uint8_t ack = IDTI_ACK_FAIL;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        snprintf(line, sizeof(line), "네트워크: %s 설정 조회 - 없는 칸 (모듈 %d, 칸 %d) -> Fail",
+                 is_input ? "입력" : "출력", module, slot);
+        log_msg(line);
+        return 1;
+    }
+
+    int rc = devset_get(net->settings_db, hdr->object, module, slot, block, len);
+    if (rc != 1)
+    {
+        /*
+         * **저장된 것이 없으면 Fail로 답한다 — 0으로 채워 보내지 않는다.**
+         * Platinum 「장치 정보 업데이트」는 읽은 값을 자기 DB에 저장한다. 운영자가 DM에서 설정해 둔
+         * 칸을 우리가 아직 못 받았는데 0을 돌려주면, **DM 쪽 설정이 0으로 덮어써진다.**
+         * 실패로 두면 DM 설정은 남는다 (DM 검증보고서 5-2: Fail은 "그 자리에 데이터 없음"이라는 정상 응답).
+         */
+        uint8_t ack = IDTI_ACK_FAIL;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        snprintf(line, sizeof(line), "네트워크: %s 설정 조회 (모듈 %d, 칸 %d) -> 저장된 것 없음, Fail",
+                 is_input ? "입력" : "출력", module, slot);
+        log_msg(line);
+        return 1;
+    }
+
+    send_setting_response(net, hdr, block, len);
+    snprintf(line, sizeof(line), "네트워크: %s 설정 조회 (모듈 %d, 칸 %d) -> %zubyte",
+             is_input ? "입력" : "출력", module, slot, len);
+    log_msg(line);
+    return 1;
+}
+
 static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
     /*
@@ -1226,6 +1384,11 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pk
     }
 
     if (handle_force_open_request(net, hdr, pkt))
+    {
+        return;
+    }
+
+    if (handle_setting_read(net, hdr))
     {
         return;
     }

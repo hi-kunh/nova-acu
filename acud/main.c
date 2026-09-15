@@ -19,6 +19,7 @@
 #include "loop.h"
 #include "events.h"
 #include "users.h"
+#include "devset.h"
 #include "userbin.h"
 #include "net.h"
 #include "discover.h"
@@ -482,6 +483,7 @@ int main(int argc, char **argv)
         return 1;
     }
     db_seed_dummy_data(db);
+    devset_init(db); /* 장치 설정 표 (입력·출력 등) — 없어도 판정은 돈다 */
 
     /*
      * 이벤트 저장소. DB를 못 열어도 NULL을 돌려주지 않고 메모리 전용 모드로 돈다
@@ -522,6 +524,7 @@ int main(int argc, char **argv)
     net_set_event_store(net, events, cfg.events_batch_size);
     net_set_userbin(net, userbin);
     net_set_users(net, users);
+    net_set_settings_db(net, db);
     apply_module_layout(net, &cfg);
 
     /* UDP 탐색. 실패해도 NULL로 두고 계속 간다 */
@@ -621,6 +624,8 @@ int main(int argc, char **argv)
                         db = new_db;
                         rt.db = db;
                         db_seed_dummy_data(db);
+                        devset_init(db);
+                        net_set_settings_db(net, db);
                         log_msg("DB 경로 변경 적용됨 (재시작 없이 전환)");
                     }
                     else
@@ -644,6 +649,7 @@ int main(int argc, char **argv)
                         net_set_event_store(net, events, new_cfg.events_batch_size);
                         net_set_userbin(net, userbin);
                         net_set_users(net, users);
+                        net_set_settings_db(net, db);
                         net_set_force_open_handler(net, on_force_open_changed, &rt);
                         apply_module_layout(net, &new_cfg);
                         net_attach_loop(net, loop);
