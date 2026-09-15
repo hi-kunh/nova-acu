@@ -2167,6 +2167,30 @@ DM 실측 요청 #3(개수·인덱스·리셋의 실제 동작)이 오면 맞춘
 `event_index_test`가 알람 시험 직후에 돌면 한 번 실패했다 — 앞 시험의 마지막 이벤트와 **같은 초**가 되돌림
 기준에 걸렸다. 1초를 넘긴 뒤 지금을 기준으로 잡도록 고쳤다(시험 쪽 문제).
 
+### 2026-09-15 (화, 오후) — 시험 한 번에 돌리기 `tools/run_tests.sh`
+
+오늘 시험을 돌리는 데 시간이 많이 들었다. 시험마다 acud를 손으로 띄우고 끄다가 앞 시험의 데이터가
+뒤 시험을 오염시켰고, `pkill -f`가 자기 셸까지 죽이는 사고도 있었다. 이제 명령 하나로 끝난다.
+
+```bash
+sh tools/run_tests.sh                                  # 개발 PC: acud 빌드 + C 시험 3 + 프로토콜 시험 6
+sh tools/run_tests.sh --acud /usr/local/sbin/acud      # 보드: 설치된 acud로 프로토콜 시험 6
+sh tools/run_tests.sh --only setting                   # 이름에 그 글자가 든 시험만
+sh tools/run_tests.sh --keep                           # 임시 폴더(로그·DB)를 남긴다
+```
+
+- **시험마다 acud를 새로 띄운다** — 임시 폴더에 빈 DB·자기 포트(19951~)·자기 FIFO. 서로 오염되지 않는다
+- acud는 **스크립트가 띄운 PID로만** 끈다 (`pkill -f` 쓰지 않음). 보드의 `acud` 서비스는 건드리지 않는다
+- 실패하면 그 시험 출력 끝 20줄과 acud.log 끝 10줄을 바로 보여 준다. 종료 코드: 전부 통과 0 / 실패 1
+- C 시험(`users_test`·`events_wrap_test`·`rru_proto_check`)은 컴파일러가 있는 개발 PC에서만 돈다
+
+| 어디서 | 결과 | 걸린 시간 |
+|---|---|---:|
+| 개발 PC | **9 / 9 통과** | 14초 |
+| 보드 (설치된 acud) | **6 / 6 통과** | 19초 |
+
+덤: `acud/Makefile`의 `rrucheck`가 `events_wrap_test`까지 빌드하던 것을 떼고, `clean`에 `events_wrap_test`를 넣었다.
+
 ## 빌드 & 실행
 
 ```bash
