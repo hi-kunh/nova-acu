@@ -1605,10 +1605,32 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pk
         return;
     }
 
-    char line[96];
+    /*
+     * 지원하지 않는 요청 — **실패 ACK로 답한다** (2026-09-15 변경, 이전에는 무응답).
+     *
+     * 실측: 무응답이면 DM이 요청마다 약 7초를 기다렸다가 넘어간다. Platinum 「장치 정보 업데이트」
+     * 한 번(요청 55건)이 180초 걸렸고 그중 약 172초가 이 기다림이었다 (답한 요청끼리는 0.33초 간격).
+     * 실패 ACK는 성공을 주장하지 않으므로 DM이 경고한 "거짓 성공"이 아니고, DM도 두 방식 모두
+     * 맞다고 했다 (9/14 회신 1절). 화면에 보이는 결과(실패)는 같고 빨라지기만 한다.
+     */
+    uint8_t ack = IDTI_ACK_FAIL;
+    send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+
+    /*
+     * 주소도 함께 남긴다. 아직 구현하지 않은 명령이 **무엇 단위로(컨트롤러 / 리더 / 출력)** 오는지를
+     * DM 캡처 없이 실제 트래픽에서 읽어 내기 위해서다 — 칸 선택은 모듈 byte(offset 10)와
+     * 비트맵(offset 11~14)이 한다 (DM 9/14 회신 4절).
+     */
+    const uint8_t *d = hdr->dest_addr;
+    char line[220];
     snprintf(line, sizeof(line),
-             "네트워크: 지원하지 않는 요청 (cmd=0x%02x sub=0x%02x obj=0x%02x) 무시",
-             hdr->command, hdr->sub_command, hdr->object);
+             "네트워크: 지원하지 않는 요청 (cmd=0x%02x sub=0x%02x obj=0x%02x "
+             "모듈=%u 비트맵=%02x%02x%02x%02x 항목=%02x-%02x 데이터=%zubyte) -> Fail",
+             hdr->command, hdr->sub_command, hdr->object,
+             d[IDTI_DEST_MODULE_IDX],
+             d[IDTI_DEST_BITMAP_IDX], d[IDTI_DEST_BITMAP_IDX + 1],
+             d[IDTI_DEST_BITMAP_IDX + 2], d[IDTI_DEST_BITMAP_IDX + 3],
+             hdr->start_item, hdr->end_item, hdr->data_len);
     log_msg(line);
 }
 
