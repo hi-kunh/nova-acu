@@ -31,9 +31,10 @@
  */
 #define IDTI_FOPT_REQUEST_ACK           0x8000 /* buf[4] bit7 */
 #define IDTI_FOPT_PASSWORD              0x4000 /* buf[4] bit6: 켜졌을 때만 Password 필드가 의미 있음 */
+#define IDTI_FOPT_BLOCKING              0x0800 /* buf[4] bit3: 이벤트를 여러 건(최대 100) 묶어 달라 — 끄면 1건 (DM 회신 9/15 3-1) */
 #define IDTI_FOPT_EXCLUDE_DEVICE_STATUS 0x0080 /* buf[5] bit7: 응답에서 Device Status를 빼라 */
 #define IDTI_FOPT_TIME_SYNC             0x0040 /* buf[5] bit6: Event Request 시 시각 동기화 (미구현) */
-#define IDTI_FOPT_RE_REQUEST_EVENT      0x0020 /* buf[5] bit5: 직전 이벤트 재요청 (미구현) */
+#define IDTI_FOPT_RE_REQUEST_EVENT      0x0020 /* buf[5] bit5: 직전에 보낸 이벤트를 다시 실어 달라 (DM이 응답을 못 읽었을 때) */
 #define IDTI_FOPT_CHECK_PACKET          0x0010 /* buf[5] bit4: Tail 4byte(CheckBytes 포함) 여부 */
 #define IDTI_FOPT_TCP                   0x0001 /* buf[5] bit0 */
 
@@ -54,6 +55,10 @@
 #define IDTI_OBJ_HISTORY       0x01 /* Event log */
 #define IDTI_OBJ_HISTORY_COUNT 0x05 /* 이벤트 개수 */
 #define IDTI_OBJ_HISTORY_INDEX 0x06 /* 이벤트 읽기 위치 (Restore Event log) */
+
+/* 이벤트 응답 한 번에 싣는 건수 — SSC-324 실측 (DM 회신 9/15 3-1): Blocking 끄면 1, 켜면 최대 100 */
+#define IDTI_EVENT_NONBLOCKING_MAX 1
+#define IDTI_EVENT_BLOCKING_MAX    100
 #define IDTI_OBJ_FIRMWARE      0x2A /* 42. PC가 접속 후 장치 상태를 물을 때 쓰는 오브젝트 */
 #define IDTI_OBJ_LCD_CONTROL   0x31 /* 49. LCD 백라이트/날짜 형식. 우리 장비에는 LCD가 없다 */
 #define IDTI_OBJ_MULTI_LANGUAGE 0xA5 /* 165. LCD 표시 언어. 우리 장비에는 LCD가 없다 */

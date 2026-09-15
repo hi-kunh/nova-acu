@@ -587,6 +587,21 @@ long long events_rewind_to_time(AcuEvents *ev, time_t from)
     return again;
 }
 
+int events_rewind_to_seq(AcuEvents *ev, int64_t first_seq)
+{
+    if (!ev || !ev->db || first_seq <= 0)
+    {
+        return -1;
+    }
+    long long sent = scalar_with(ev, ev->st_sent, 0);
+    long long target = (long long)first_seq - 1;
+    if (target >= sent)
+    {
+        return 0; /* 이미 그 앞에 있다 - 앞으로 밀지는 않는다 */
+    }
+    return set_sent_seq(ev, target);
+}
+
 int events_mark_all_sent(AcuEvents *ev)
 {
     if (!ev)

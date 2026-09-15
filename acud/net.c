@@ -76,7 +76,14 @@ struct AcuNet {
      * NULL이면 이벤트를 보고하지 않는다 (출입 판정 자체는 계속 동작해야 한다).
      */
     AcuEvents *events;
-    int event_batch; /* 한 응답에 실을 최대 건수 */
+    int event_batch; /* 한 응답에 실을 최대 건수 (Blocking일 때 IDTI_EVENT_BLOCKING_MAX와 작은 쪽) */
+
+    /*
+     * 직전에 보낸 이벤트 묶음의 첫 seq (0=없음). DM이 응답을 못 읽으면 다음 요청에
+     * ReRequestEvent를 켠다 — 그때 이 앞으로 되돌려 같은 묶음을 다시 싣는다.
+     * 연결이 끊겼다 다시 붙어도 유지한다 (응답을 못 읽은 DM은 보통 다시 접속해서 묻는다).
+     */
+    int64_t last_batch_first_seq;
 
     /* 사용자 바이너리 전송 수신 (userbin.h). NULL이면 그 명령을 받지 않는다 */
     AcuUserBin *userbin;
@@ -673,7 +680,12 @@ static int send_response(AcuNet *net, const IdtiHeader *hdr,
     memcpy(dest_addr, hdr->src_addr, IDTI_ADDR_SRC_LEN);
     static const uint8_t src_addr[IDTI_ADDR_SRC_LEN] = {0x01, 0x01, 0x01, 0x01, 0x01};
 
-    uint16_t resp_option = exclude_status ? IDTI_FOPT_EXCLUDE_DEVICE_STATUS : 0;
+    /* SSC-324는 요청의 FrameOption을 되돌린다(DM 회신 9/15 5절 `88 01`) — Blocking·TCP 비트를 따라 싣는다 */
+    uint16_t resp_option = (uint16_t)(hdr->frame_option & (IDTI_FOPT_BLOCKING | IDTI_FOPT_TCP));
+    if (exclude_status)
+    {
+        resp_option |= IDTI_FOPT_EXCLUDE_DEVICE_STATUS;
+    }
 
     uint8_t *out = net->resp_buf;
     int n = idti_build_packet(out, NET_RESP_BUF_CAP, dest_addr, src_addr,
@@ -775,23 +787,55 @@ static void apply_time_sync(AcuNet *net, const uint8_t *data, size_t data_len)
 static void handle_history_request(AcuNet *net, const IdtiHeader *hdr)
 {
     /*
-     * 이벤트를 **여러 건 묶어** 보낸다. 예전에는 한 요청에 1건씩 올렸는데, 폴링이 3초라
-     * 쌓인 이벤트를 비우는 데 건당 3초가 걸렸다 (1,000건이면 50분).
+     * 한 응답에 싣는 건수는 **요청의 Blocking 비트**가 정한다 (DM 회신 9/15 3-1, SSC-324 실측):
+     *   Blocking 0 -> 최대 1건      Blocking 1 -> 최대 100건
+     * DM은 컨트롤러마다 `packeteventblocking`으로 고른다. 건수는 데이터 길이 ÷ OneDataBlockSize로 센다.
      *
-     * 건수는 헤더가 알려 준다 — DM은 **데이터 길이 ÷ OneDataBlockSize** 로 센다
-     * (2026-09-11 DM 회신 4-1). OneDataBlockSize에 이벤트 한 건의 크기(36)를 넣는다.
+     * 응답 헤더 (SSC-324 Blocking 응답):
+     *   Start 1 · End = 실은 건수 · Count = **읽기 전 미전송 건수** · OneDataBlockSize 36
      */
     /* 단일 스레드라 static으로 둔다 - 최대 묶음이면 합쳐서 30KB가 넘어 스택에 두기 부담스럽다 */
     static AcuEvent batch[NET_EVENT_BATCH_MAX];
     static uint8_t  data[NET_EVENT_DATA_CAP];
 
+    int blocking = (hdr->frame_option & IDTI_FOPT_BLOCKING) ? 1 : 0;
+    int max = IDTI_EVENT_NONBLOCKING_MAX;
+    if (blocking)
+    {
+        max = (net->event_batch < IDTI_EVENT_BLOCKING_MAX) ? net->event_batch : IDTI_EVENT_BLOCKING_MAX;
+    }
+
+    /* 직전 응답을 못 읽었다는 표시 — 같은 묶음을 다시 싣는다 (이 비트를 무시하면 그 묶음을 잃는다) */
+    if ((hdr->frame_option & IDTI_FOPT_RE_REQUEST_EVENT) && net->events)
+    {
+        char line[160];
+        if (net->last_batch_first_seq > 0 &&
+            events_rewind_to_seq(net->events, net->last_batch_first_seq) == 0)
+        {
+            snprintf(line, sizeof(line), "네트워크: 이벤트 재요청 - 직전 묶음(seq %lld부터)을 다시 싣는다",
+                     (long long)net->last_batch_first_seq);
+        }
+        else
+        {
+            snprintf(line, sizeof(line),
+                     "네트워크: 이벤트 재요청 - 되돌릴 직전 묶음이 없다 (재시작 뒤이거나 메모리 전용) - 미전송분만 싣는다");
+        }
+        log_msg(line);
+    }
+
     int n = 0;
+    long long pending_before = 0;
     if (net->events)
     {
-        n = events_fetch(net->events, batch, net->event_batch);
+        n = events_fetch(net->events, batch, max);
         if (n < 0)
         {
             n = 0;
+        }
+        pending_before = events_pending(net->events); /* fetch가 읽기 위치를 바로잡은 뒤의 값 */
+        if (pending_before < n)
+        {
+            pending_before = n;
         }
     }
 
@@ -803,7 +847,7 @@ static void handle_history_request(AcuNet *net, const IdtiHeader *hdr)
     size_t data_len = (size_t)n * IDTI_EVENT_INFO_LEN;
     uint16_t start = (n > 0) ? 1 : 0;
     uint16_t end = (uint16_t)n;
-    uint16_t count = (uint16_t)n;
+    uint16_t count = (uint16_t)((pending_before > 0xFFFF) ? 0xFFFF : pending_before);
     uint16_t one_len = (n > 0) ? IDTI_EVENT_INFO_LEN : 0;
 
     if (send_response(net, hdr, IDTI_CMD_SND_DATA, IDTI_SUBCMD_READ, IDTI_OBJ_HISTORY,
@@ -825,13 +869,15 @@ static void handle_history_request(AcuNet *net, const IdtiHeader *hdr)
      * 전송 위치는 **응답을 보낸 뒤에** 전진시킨다. 먼저 옮기면 전송이 실패했을 때 이벤트가
      * 사라진다. 반대로 여기서 전원이 끊기면 같은 이벤트를 한 번 더 보내게 되는데,
      * 잃는 것보다 겹치는 편이 낫다 (DM은 이벤트를 그대로 INSERT 한다).
+     * SSC-324도 응답을 보내는 순간 포인터를 옮긴다 (DM 회신 9/15 3-2) — 못 읽은 쪽은 ReRequestEvent로 되찾는다.
      */
+    net->last_batch_first_seq = batch[0].seq;
     if (events_ack(net->events, batch[n - 1].seq) != 0)
     {
         log_msg("네트워크: 전송 위치를 저장하지 못했다 - 다음 요청에 같은 이벤트가 다시 나갈 수 있다");
     }
 
-    if (n >= net->event_batch)
+    if (n >= IDTI_EVENT_BLOCKING_MAX || (n > 1 && n >= max))
     {
         char line[160];
         long long left = events_pending(net->events);
@@ -1381,10 +1427,21 @@ static void send_setting_response(AcuNet *net, const IdtiHeader *hdr,
                   data, len, 1, 1, 1, (uint16_t)len);
 }
 
+/*
+ * 결과 1byte ACK (1=Success, 2=Fail). SSC-324 카드리더 쓰기 응답 캡처(DM 회신 9/15 5절):
+ *   Command/Sub 요청 그대로 · Item FF FF · Block 1/1/1 · OneDataBlockSize 1
+ */
+static void send_result_ack(AcuNet *net, const IdtiHeader *hdr, uint8_t result)
+{
+    IdtiHeader h = *hdr;
+    h.start_item = 0xFF;
+    h.end_item = 0xFF;
+    send_response(net, &h, hdr->command, hdr->sub_command, hdr->object, &result, 1, 1, 1, 1, 1);
+}
+
 static void send_fail_ack(AcuNet *net, const IdtiHeader *hdr)
 {
-    uint8_t ack = IDTI_ACK_FAIL;
-    send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+    send_result_ack(net, hdr, IDTI_ACK_FAIL);
 }
 
 /* 이벤트·로그에 쓰는 칸 번호 (컨트롤러 단위는 0) */
@@ -1493,8 +1550,7 @@ static int handle_setting_write(AcuNet *net, const IdtiHeader *hdr, const uint8_
         why = "저장 실패";
     }
 
-    uint8_t ack = why ? IDTI_ACK_FAIL : IDTI_ACK_SUCCESS;
-    send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+    send_result_ack(net, hdr, why ? IDTI_ACK_FAIL : IDTI_ACK_SUCCESS);
 
     char line[520];
     if (why)
@@ -1602,7 +1658,14 @@ static int handle_event_store_request(AcuNet *net, const IdtiHeader *hdr, const 
         body[1] = (uint8_t)(pending >> 16);
         body[2] = (uint8_t)(pending >> 8);
         body[3] = (uint8_t)pending;
-        send_setting_response(net, hdr, body, sizeof(body));
+
+        /* SSC-324 응답 (DM 회신 9/15 3-2): Frame 00 00 / 00 00 · Item 00 / 00 · 블록 인덱스 전부 0 */
+        IdtiHeader h = *hdr;
+        h.frame_index = 0;
+        h.start_item = 0;
+        h.end_item = 0;
+        send_response(net, &h, hdr->command, hdr->sub_command, hdr->object,
+                      body, sizeof(body), 0, 0, 0, 0);
 
         snprintf(line, sizeof(line), "네트워크: 이벤트 개수 조회 -> 미전송 %lld건", pending);
         log_msg(line);

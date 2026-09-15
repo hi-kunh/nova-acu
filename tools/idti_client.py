@@ -51,6 +51,8 @@ FIRMWARE_INFO_LEN = 268
 
 # Frame Option 비트 (buf[4]<<8 | buf[5] 로 합친 값 기준)
 FOPT_REQUEST_ACK = 0x8000
+FOPT_BLOCKING = 0x0800        # 이벤트를 최대 100건 묶어 받는다 (끄면 1건)
+FOPT_RE_REQUEST_EVENT = 0x0020  # 직전 이벤트 묶음을 다시 달라
 FOPT_EXCLUDE_DEVICE_STATUS = 0x0080
 FOPT_CHECK_PACKET = 0x0010
 FOPT_TCP = 0x0001

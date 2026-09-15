@@ -89,6 +89,13 @@ int events_repair_index(AcuEvents *ev);
 long long events_rewind_to_time(AcuEvents *ev, time_t from);
 
 /*
+ * 읽기 위치를 **`first_seq` 앞**으로 되돌린다 (ReRequestEvent — 직전에 보낸 묶음을 다시 싣는다).
+ * 이미 그보다 앞에 있으면 건드리지 않는다. 메모리 전용 모드는 되돌릴 수 없다.
+ * 반환: 0=성공, -1=실패
+ */
+int events_rewind_to_seq(AcuEvents *ev, int64_t first_seq);
+
+/*
  * 모든 이벤트를 **보낸 것으로 표시**한다 (EventReset).
  * ⚠ 지우지 않는다 — 출입 기록은 되돌릴 수 없는 증거라, 필요하면 `events_rewind_to_time()`으로
  *   되살릴 수 있게 둔다. 링 삭제 한도는 그대로 적용된다.

@@ -34,12 +34,21 @@ def want(label, got, exp):
         fails.append(label)
 
 
-def ask(port, cmd, sub, obj, data=b""):
+BLOCKING = c.FOPT_REQUEST_ACK | c.FOPT_BLOCKING | c.FOPT_TCP
+NONBLOCKING = c.FOPT_REQUEST_ACK | c.FOPT_TCP
+
+
+def raw(port, cmd, sub, obj, data=b"", option=NONBLOCKING, frame_index=1):
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
-    s.sendall(c.build_request(cmd, sub, obj, frame_index=1, data=data))
+    s.sendall(c.build_request(cmd, sub, obj, frame_index=frame_index, data=data, frame_option=option))
     r = c.recv_packet(s, 5)
     s.close()
-    return bytes(r[44 + 234:-2]) if r else None
+    return bytes(r) if r else None
+
+
+def ask(port, cmd, sub, obj, data=b""):
+    r = raw(port, cmd, sub, obj, data)
+    return r[44 + 234:-2] if r else None
 
 
 def count(port):
@@ -47,9 +56,17 @@ def count(port):
     return int.from_bytes(b[0:4], "big") if b and len(b) >= 36 else None
 
 
-def poll(port):
-    b = ask(port, 0x06, 0x02, 0x01) or b""
-    return len(b) // 36
+def poll(port, option=BLOCKING):
+    """이벤트 폴링 -> (받은 건수, 응답 헤더 End, Count). 기본은 Blocking(최대 100건)"""
+    r = raw(port, 0x06, 0x02, 0x01, option=option)
+    return len(r[44 + 234:-2]) // 36 if r else 0
+
+
+def poll_hdr(port, option):
+    r = raw(port, 0x06, 0x02, 0x01, option=option)
+    n = len(r[44 + 234:-2]) // 36
+    blocks = [int.from_bytes(r[i:i + 2], "big") for i in (36, 38, 40, 42)]
+    return n, blocks, int.from_bytes(r[4:6], "big")
 
 
 def index_change(port, typ, start=b"\x00" * 6, end=b"\x00" * 6):
@@ -65,9 +82,14 @@ def bcd(n):
 
 
 def tap(fifo, n):
-    with open(fifo, "w") as f:
-        for _ in range(n):
-            f.write("04A1B2C3D4E5F600\n")
+    # mock 카드 대기 큐가 16칸이라 한 번에 많이 넣으면 넘친다 - 10장씩 나눠 넣는다
+    while n > 0:
+        k = min(n, 10)
+        with open(fifo, "w") as f:
+            for _ in range(k):
+                f.write("04A1B2C3D4E5F600\n")
+        n -= k
+        time.sleep(0.2)
     time.sleep(0.6)
 
 
@@ -131,6 +153,37 @@ def main():
     sent = db.execute("SELECT value FROM event_state WHERE key='sent_seq'").fetchone()[0]
     mx2 = db.execute("SELECT MAX(seq) FROM events").fetchone()[0]
     want("읽기 위치 == 쓰기 위치", sent, mx2)
+
+    print("\n[6] Blocking 비트 — 끄면 1건, 켜면 여러 건 (DM 회신 9/15 3-1, SSC-324 실측)")
+    while poll(P):
+        pass
+    tap(a.fifo, 3)
+    n, blocks, opt = poll_hdr(P, NONBLOCKING)
+    want("Blocking 0: 받은 건수", n, 1)
+    want("Blocking 0: 블록 Start/End/Count/Size", blocks, [1, 1, 3, 36])
+    want("Blocking 0: 응답 FrameOption에 Blocking 없음", bool(opt & c.FOPT_BLOCKING), False)
+    n, blocks, opt = poll_hdr(P, BLOCKING)
+    want("Blocking 1: 받은 건수", n, 2)
+    want("Blocking 1: 블록 Start/End/Count(=읽기 전 미전송)/Size", blocks, [1, 2, 2, 36])
+    want("Blocking 1: 응답 FrameOption에 Blocking 에코", bool(opt & c.FOPT_BLOCKING), True)
+
+    print("\n[7] ReRequestEvent — 직전 묶음을 다시 싣는다")
+    n, blocks, _ = poll_hdr(P, BLOCKING | c.FOPT_RE_REQUEST_EVENT)
+    want("재요청: 직전 2건 다시", n, 2)
+    want("재요청 뒤 개수", count(P), 0)
+    want("재요청 없이 폴링: 빈손", poll(P), 0)
+
+    print("\n[8] 100건 상한")
+    tap(a.fifo, 120)
+    want("Blocking 1: 최대 100건", poll(P), 100)
+    want("나머지", poll(P), 20)
+
+    print("\n[9] Event Count 응답 헤더 — Frame·Item·블록 전부 0 (DM 회신 9/15 3-2)")
+    r = raw(P, 0x06, 0x02, 0x05, frame_index=0x00010001)
+    want("Frame 인덱스", r[20:24].hex(), "00000000")
+    want("Item", r[34:36].hex(), "0000")
+    want("블록 인덱스·크기", r[36:44].hex(), "0000000000000000")
+    want("길이 (헤더44 + 상태234 + 36 + 2)", len(r), 316)
 
     print("\n" + ("전부 통과" if not fails else f"실패 {len(fails)}건: {fails}"))
     return 1 if fails else 0

@@ -60,7 +60,8 @@ def body(r):
 
 def events(port):
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
-    s.sendall(c.build_request(c.CMD_REQ_DATA, c.SUBCMD_READ, c.OBJ_HISTORY, frame_index=1))
+    s.sendall(c.build_request(c.CMD_REQ_DATA, c.SUBCMD_READ, c.OBJ_HISTORY, frame_index=1,
+                              frame_option=c.FOPT_REQUEST_ACK | c.FOPT_BLOCKING | c.FOPT_TCP))
     r = c.recv_packet(s, 5)
     s.close()
     d = body(r) or b""

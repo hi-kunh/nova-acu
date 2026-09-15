@@ -2251,6 +2251,42 @@ DM에서 출력 두 칸의 동작 종류를 **Alarm**으로 바꿔 전송했다.
 **DM 화면에 알람·화재 이벤트 4건이 올라온 것을 사용자가 확인.** 설정 쓰기 → 저장 → 규칙 → 출력 → 이벤트가 실제 DM으로 한 바퀴 돌았다.
 (출력은 아직 mock 로그다 — 실제 릴레이는 RRU 보드 도착 후)
 
+### 2026-09-15 (화, 저녁) — DM 회신 반영: Blocking · ReRequestEvent · Event Count 헤더 · 카드리더 쓰기 캡처 (9/16 몫 1번)
+
+DM이 새 저장소(`nova-dm`)로 회신 `NCU_질의_설정쓰기_실측_20260915_회신.md`를 보냈다. 요점과 반영:
+
+| DM 회신 | 반영 |
+|---|---|
+| 카드리더 쓰기 0byte는 **DM 버그**(출력 DTO로 읽음). 고쳤다. **SSC-324는 0byte에 성공으로 답했다 — 따라 하지 말 것** | 그대로 (짧으면 Fail). SSC-324 **32byte 요청·응답 캡처**로 시험 추가 |
+| 성공 ACK는 NCU가 맞다 · **무응답보다 실패 ACK** | 이미 그렇게 함 |
+| 🔴 여러 건 받기는 블록 인덱스가 아니라 **FrameOption bit11 `Blocking`** — 끄면 1건, 켜면 최대 100건 | **구현** |
+| Blocking 응답 헤더: Start 1 · End = 실은 건수 · **Count = 읽기 전 미전송** · Size 36 | **구현** |
+| DM은 응답을 못 읽으면 다음 요청에 **`ReRequestEvent`(bit5)** — 직전 레코드를 다시 실어야 유실이 없다 | **구현** |
+| Event Count = 미전송 건수 (NCU 구현이 맞다). 응답 헤더는 Frame·Item·블록 **전부 0** | 헤더 **수정** |
+| 미전송이 있으면 요청마다 반드시 1건 이상 | 이미 그렇게 함 (쓰기 직전 읽기 위치 복구) |
+
+**구현**
+- `handle_history_request()` — 싣는 건수 = Blocking이면 `min(events_batch_size, 100)`, 아니면 **1**.
+  ⚠ 전에는 Blocking과 무관하게 200건까지 실었다. SSC-324와 같게 맞췄다 — **DM이 ncu01의 `packeteventblocking`을 0으로 두면 폴링당 1건**이다
+- ReRequestEvent — 직전 묶음의 첫 seq를 기억해 두고 `events_rewind_to_seq()`로 그 앞까지 되돌린 뒤 싣는다.
+  연결이 끊겼다 다시 붙어도 기억한다. acud 재시작 뒤라 기억이 없으면 로그만 남기고 미전송분을 싣는다
+- 응답 FrameOption에 요청의 **Blocking·TCP 비트를 되돌린다** (SSC-324 응답 `88 01` 에코)
+- 결과 1byte ACK(설정 쓰기·미지원 Fail) — Item `FF FF` (SSC-324 카드리더 쓰기 응답 캡처)
+- Event Count 응답 — Frame 인덱스 0 · Item 0 · 블록 인덱스 0
+
+**시험** (`sh tools/run_tests.sh` PC 9/9, 보드 6/6)
+- `setting_write_test` [6] — **DM이 SSC-324에 보낸 78byte 프레임을 한 byte도 안 바꾸고** 보낸다 →
+  응답 FrameOption `8801` · Frame `00010001` · `05 05` · `00 2F` · Item `FFFF` · 블록 `1/1/1/1` · 281byte · `01`,
+  이벤트 `10230301 (1, 1)`, 되읽기 = 받은 32byte. **SSC-324 응답과 일치**
+- `event_index_test` [6]~[9] — Blocking 0: 1건·블록 `[1,1,3,36]` / Blocking 1: 2건·`[1,2,2,36]`·FrameOption 에코 /
+  ReRequest: 직전 2건 다시 → 개수 0 / 120건 → 100 + 20 / Event Count 헤더 0·316byte
+- 시험기 폴링은 이제 Blocking을 켠다 (`idti_client.FOPT_BLOCKING`). mock 카드 큐가 16칸이라 많이 넣을 때 10장씩 나눠 넣는다
+
+**보드 배포** (md5 `47f86a4f…`) — 재시작 뒤 DM이 4분 만에 다시 붙어 카드 3장 이벤트를 전부 가져감 (`sent_seq` 26→29)
+
+**사용자가 알려 준 DM 동작** — 「사용자 보내기」는 **1명씩**(오늘 본 `0x22` 67건), **동기화 기능은 10~20명씩 묶어서** 보낸다.
+묶음 동기화는 아직 실제 DM으로 받아 보지 않았다 (시험기로만 확인한 바이너리 전송 `0xD0`/`0xD1`일 가능성)
+
 ## 빌드 & 실행
 
 ```bash

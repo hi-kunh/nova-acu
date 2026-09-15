@@ -73,7 +73,8 @@ def output_block(active_type, by_fire=False, active_time=3):
 
 def events(port):
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
-    s.sendall(c.build_request(c.CMD_REQ_DATA, c.SUBCMD_READ, c.OBJ_HISTORY, frame_index=1))
+    s.sendall(c.build_request(c.CMD_REQ_DATA, c.SUBCMD_READ, c.OBJ_HISTORY, frame_index=1,
+                              frame_option=c.FOPT_REQUEST_ACK | c.FOPT_BLOCKING | c.FOPT_TCP))
     r = c.recv_packet(s, 5)
     s.close()
     data = body(r) or b""
@@ -151,6 +152,29 @@ def main():
     step("fire on",   "화재까지 동작",   [(1, 9), (1, 10)], [],        [(2, 11)])
     step("alarm off", "알람 복구(화재 남음)", [(1, 9)],      [(1, 10)], [(2, 11)])
     step("fire off",  "화재 복구",       [],                [(1, 9), (1, 10)], [(2, 11)])
+
+    print("\n[6] 카드리더 쓰기 — DM이 SSC-324(ACU04)에 보낸 프레임 그대로 (DM 회신 9/15 5절)")
+    capture = bytes.fromhex(
+        "02 00 4E 02 88 01 2C 01 01 01 01 00 00 00 01 01 01 01 01 01 00 01 00 01 00 00 00 00 00 05 05 EB"
+        " 01 2F 01 FF 00 01 00 01 00 01 00 00"
+        " 00 00 A8 44 80 F2 01 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+        " 08 03")
+    events(P)  # 5절 알람·화재 이벤트를 비운다
+    r = exchange(P, capture)
+    want("응답 받음", r is not None, True)
+    if r:
+        # SSC-324 응답: 88 01 ... 05 05 CS 00 2F FF FF 00 01 00 01 00 01 00 01 + 상태 234 + 01 + 08 03
+        want("FrameOption (요청 에코)", bytes(r[4:6]).hex(), "8801")
+        want("Frame 인덱스", bytes(r[20:24]).hex(), "00010001")
+        want("Cmd/Sub", bytes(r[29:31]).hex(), "0505")
+        want("DataType/Object", bytes(r[32:34]).hex(), "002f")
+        want("Item", bytes(r[34:36]).hex(), "ffff")
+        want("블록 인덱스·크기", bytes(r[36:44]).hex(), "0001000100010001")
+        want("길이 (헤더44 + 상태234 + 1 + 2)", len(r), 281)
+        want("결과", body(r), b"\x01")
+    want("설정 성공 이벤트 10230301 (1, 1)", events(P), [(0x10230301, 1, 1)])
+    back = body(exchange(P, frame(0x06, 0x02, 0x2F, 1, 0)))
+    want("되읽기 = 받은 32byte", back, capture[44:76])
 
     print("\n" + ("전부 통과" if not fails else f"실패 {len(fails)}건: {fails}"))
     return 1 if fails else 0
