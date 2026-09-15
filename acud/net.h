@@ -105,6 +105,12 @@ void net_push_system_event(AcuNet *net, uint32_t event_code, int module_addr, in
  */
 void net_set_settings_db(AcuNet *net, sqlite3 *db);
 
+/*
+ * 설정 쓰기(Cmd 5 / Sub 5)가 저장에 성공하면 부를 함수. object는 0x2C 입력 / 0x2D 출력.
+ * 출력 설정이 바뀌면 지금 울리고 있는 알람 릴레이 대상도 바뀔 수 있어 main이 다시 계산한다.
+ */
+void net_set_setting_changed_handler(AcuNet *net, void (*cb)(uint8_t object, void *user), void *user);
+
 /* 지금 강제 개방 상태인지 (Object 206). net이 NULL이면 0 */
 int net_force_open_state(const AcuNet *net);
 

@@ -92,8 +92,12 @@ struct AcuNet {
     void (*on_force_open)(int on, void *user);
     void *force_open_user;
 
-    /* 장치 설정(입력·출력 등)을 담은 acud.db. NULL이면 설정 조회에 Fail로 답한다 */
+    /* 장치 설정(입력·출력 등)을 담은 acud.db. NULL이면 설정 조회·쓰기에 Fail로 답한다 */
     sqlite3 *settings_db;
+
+    /* 설정이 저장되면 부른다 — main이 알람 릴레이 상태를 다시 계산한다 */
+    void (*on_setting_changed)(uint8_t object, void *user);
+    void *setting_changed_user;
 
     /*
      * 붙어 있는 이벤트 루프. 리슨 fd와 클라이언트 fd를 여기에 등록한다.
@@ -412,6 +416,15 @@ void net_push_system_event(AcuNet *net, uint32_t event_code, int module_addr, in
     net_store_event(net, event_code, IDTI_OPMODE_NONE, NULL,
                     net ? net->door_status : IDTI_DOOR_STATUS_NONE,
                     module_addr, reader_addr);
+}
+
+void net_set_setting_changed_handler(AcuNet *net, void (*cb)(uint8_t object, void *user), void *user)
+{
+    if (net)
+    {
+        net->on_setting_changed = cb;
+        net->setting_changed_user = user;
+    }
 }
 
 void net_set_settings_db(AcuNet *net, sqlite3 *db)
@@ -1348,6 +1361,88 @@ static int handle_setting_read(AcuNet *net, const IdtiHeader *hdr)
     return 1;
 }
 
+/*
+ * 장치 설정 쓰기 (Cmd 5 SendData / Sub 5 Change). 처리했으면 1.
+ *   0x2C 입력 21byte  /  0x2D 출력 14byte — 칸마다 따로 온다 (DM 회신: "현장 동작은 한 칸씩")
+ *
+ * **받은 byte 그대로 저장하고, 저장에 성공했을 때만** 설정 성공 이벤트를 올린다.
+ * 9/14에 DM이 "쓰기 성공"을 잘못 적은 이유가 바로 이 표식이 없었기 때문이다.
+ */
+static int handle_setting_write(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
+{
+    if (hdr->command != IDTI_CMD_SND_DATA || hdr->sub_command != IDTI_SUBCMD_CHANGE)
+    {
+        return 0;
+    }
+    if (hdr->object != IDTI_OBJ_INPUT && hdr->object != IDTI_OBJ_OUTPUT)
+    {
+        return 0;
+    }
+
+    int is_input = (hdr->object == IDTI_OBJ_INPUT);
+    size_t want_len = is_input ? IDTI_INPUT_SETTING_LEN : IDTI_OUTPUT_SETTING_LEN;
+    const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;
+    int module = 0, slot = 0;
+    const char *why = NULL;
+
+    if (hdr->data_len < want_len)
+    {
+        why = "데이터가 짧다";
+    }
+    else if (request_slot(hdr, &module, &slot) != 0)
+    {
+        why = "비트맵이 비었다";
+    }
+    else if (module < 1 || module > net->layout.module_count)
+    {
+        why = "없는 모듈";
+    }
+    else if (!(is_input ? slot_is_input(slot) : slot_is_output(slot)))
+    {
+        why = is_input ? "입력 자리가 아니다" : "출력 자리가 아니다";
+    }
+    else if (devset_put(net->settings_db, hdr->object, module, slot, data, want_len) != 0)
+    {
+        why = "저장 실패";
+    }
+
+    uint8_t ack = why ? IDTI_ACK_FAIL : IDTI_ACK_SUCCESS;
+    send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+
+    char line[200];
+    if (why)
+    {
+        snprintf(line, sizeof(line), "네트워크: %s 설정 쓰기 (모듈 %d, 칸 %d) -> Fail (%s)",
+                 is_input ? "입력" : "출력", module, slot + IDTI_SLOT_EVENT_BASE, why);
+        log_msg(line);
+        return 1;
+    }
+
+    net_push_system_event(net, is_input ? IDTI_EVENT_INPUT_SET_OK : IDTI_EVENT_OUTPUT_SET_OK,
+                          module, slot + IDTI_SLOT_EVENT_BASE);
+
+    if (!is_input)
+    {
+        snprintf(line, sizeof(line),
+                 "네트워크: 출력 설정 저장 (모듈 %d, 칸 %d) - 동작 종류 %u%s%s",
+                 module, slot + IDTI_SLOT_EVENT_BASE, data[IDTI_OUTPUT_OFF_ACTIVE_TYPE],
+                 data[IDTI_OUTPUT_OFF_ACTIVE_TYPE] == IDTI_OUTPUT_ACTIVE_TYPE_ALARM ? "(Alarm)" : "",
+                 (data[IDTI_OUTPUT_OFF_ACTIVE_OPTION] & IDTI_OUTPUT_OPTION_BY_FIRE) ? " · 화재로 동작" : "");
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "네트워크: 입력 설정 저장 (모듈 %d, 칸 %d) - 용도 %u",
+                 module, slot + IDTI_SLOT_EVENT_BASE, data[6]);
+    }
+    log_msg(line);
+
+    if (net->on_setting_changed)
+    {
+        net->on_setting_changed(hdr->object, net->setting_changed_user);
+    }
+    return 1;
+}
+
 static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
     /*
@@ -1389,6 +1484,11 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pk
     }
 
     if (handle_setting_read(net, hdr))
+    {
+        return;
+    }
+
+    if (handle_setting_write(net, hdr, pkt))
     {
         return;
     }

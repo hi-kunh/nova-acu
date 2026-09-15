@@ -108,6 +108,13 @@
 #define IDTI_EVENT_HW_NO_RESPONSE   0x20030102u /* H/W No Response — RRU USB 단절 */
 
 /*
+ * 설정이 **장비에 실제로 들어갔다**는 표식 (DM 9/11 회신: "서버가 확인하는 유일한 표식").
+ * 주소는 (모듈, **칸 번호 1부터**) — 현장 기록 `10210301 → (1,14)`, `10220301 → (1,9)(1,10)(2,11)`.
+ */
+#define IDTI_EVENT_INPUT_SET_OK  0x10210301u /* Data > Input  > Change > Success */
+#define IDTI_EVENT_OUTPUT_SET_OK 0x10220301u /* Data > Output > Change > Success */
+
+/*
  * 이벤트 주소 규칙 (2026-09-11 DM 회신, HARDWARE.md "이벤트 주소").
  * DM은 byte 6·7을 가공 없이 화면에 쓰므로 여기서 정확히 채워야 한다.
  */
@@ -176,6 +183,14 @@
  * `StartDataBlockIdx`(36~37)는 "몇 개짜리 묶음인가"만 말하고 **몇 번 칸인지는 말하지 않는다.**
  * IdtiHeader.dest_addr[8]이 offset 7~14를 그대로 담고 있다.
  */
+/*
+ * **칸 번호 두 가지** — 섞지 말 것.
+ *   비트 번호(0부터)  요청 비트맵의 비트 = 14칸 배치의 자리. 저장 열쇠로 쓴다
+ *   칸 번호(1부터)    이벤트 주소·반응 장치 주소 = 비트 번호 + 1
+ * 현장 기록이 1부터를 보여 준다: 알람 `(1,13)` = 자리 12, 출력 설정 `(1,9)` = 자리 8(첫 출력).
+ */
+#define IDTI_SLOT_EVENT_BASE 1
+
 #define IDTI_DEST_MODULE_IDX 3 /* dest_addr[3] = offset 10 */
 #define IDTI_DEST_BITMAP_IDX 4 /* dest_addr[4..7] = offset 11~14, 빅엔디언 */
 #define IDTI_FORCE_OPEN_ON  0x01

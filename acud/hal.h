@@ -87,13 +87,13 @@ int hal_open_door(int seconds);
 int hal_set_force_open(int on);
 
 /*
- * **알람 릴레이** — 동작 종류가 Alarm인 출력 전부를 켜거나 끈다 (SSC-324 실측 동작).
- * RRU는 릴레이를 스스로 움직이지 않으므로 **ACU가 판단해 명령한다**.
- * ⚠ 어느 출력이 Alarm인지는 **출력 설정(Object 45)** 을 받아야 안다 — DM 원시 바이트 대기 중.
- *   그때까지는 mock이 "전부"로 흉내 낸다.
+ * 출력 하나를 켜거나 끈다. module은 1부터, slot은 **칸 번호 1부터**(이벤트 주소와 같은 체계).
+ * 어느 출력을 움직일지는 **ACU가 판단한다** — RRU는 릴레이를 스스로 움직이지 않는다.
+ * 알람·화재 때는 main이 출력 설정(ActiveType·IsActiveOption)을 보고 대상을 골라 이걸 부른다.
+ * 6단계에서는 RRU에 `OUTPUT` 명령으로 나간다.
  * 반환: 0=성공, -1=실패
  */
-int hal_set_alarm_relays(int on);
+int hal_set_output(int module, int slot, int on);
 
 /*
  * 링크가 끊긴 RRU 번호를 하나 꺼낸다 (없으면 0).

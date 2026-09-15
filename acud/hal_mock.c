@@ -436,12 +436,10 @@ int hal_set_force_open(int on)
     return 0;
 }
 
-int hal_set_alarm_relays(int on)
+int hal_set_output(int module, int slot, int on)
 {
-    char line[140];
-    snprintf(line, sizeof(line),
-             "HAL(mock): 알람 릴레이 %s (동작 종류 Alarm인 출력 전부 - mock은 전부로 흉내)",
-             on ? "켬" : "끔");
+    char line[96];
+    snprintf(line, sizeof(line), "HAL(mock): 출력 (모듈 %d, 칸 %d) %s", module, slot, on ? "켬" : "끔");
     log_msg(line);
     return 0;
 }

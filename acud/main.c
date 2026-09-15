@@ -136,6 +136,59 @@ static void report_rru_disconnected(AcuRuntime *rt, int rru)
 }
 
 /*
+ * **알람 릴레이 규칙** — 출력 설정을 보고 지금 켜져 있어야 할 출력을 맞춘다.
+ *
+ * 규칙 (2026-09-14 DM 회신 3-3, 현장 SSC-324 실측):
+ *   - 동작 종류 `ActiveType = 2 (Alarm)`인 출력은 **보드 전체에서 전부** 동작한다
+ *   - 화재로도 함께 울릴지는 `IsActiveOption` **bit7**이 정한다
+ *
+ * ⇒ Alarm인 출력마다 `켜짐 = 알람 동작 || (화재 동작 && bit7)`.
+ *   알람이 복구돼도 화재가 남아 있으면 bit7 출력은 계속 켜져 있어야 해서, 바뀔 때마다 **전부 다시 계산**한다.
+ *
+ * ⚠ "화재로도 함께"를 **Alarm인 출력 가운데 bit7이 켜진 것**으로 읽었다. Alarm이 아닌 출력의 bit7이
+ *   화재 때 동작하는지는 DM에 확인할 항목이다. (문 개방은 DM 정책이 강제 개방으로 한다 — 여기서 하지 않는다)
+ */
+static void apply_alarm_outputs(AcuRuntime *rt)
+{
+    int alarm_outputs = 0;
+
+    for (int module = 1; module <= rt->cfg->module_count; module++)
+    {
+        for (int slot = 8; slot <= 11; slot++) /* 14칸 배치의 출력 자리 */
+        {
+            uint8_t out[IDTI_OUTPUT_SETTING_LEN];
+            if (devset_get(rt->db, IDTI_OBJ_OUTPUT, module, slot, out, sizeof(out)) != 1)
+            {
+                continue; /* 설정이 없는 출력은 건드리지 않는다 */
+            }
+            if (out[IDTI_OUTPUT_OFF_ACTIVE_TYPE] != IDTI_OUTPUT_ACTIVE_TYPE_ALARM)
+            {
+                continue;
+            }
+            alarm_outputs++;
+
+            int by_fire = (out[IDTI_OUTPUT_OFF_ACTIVE_OPTION] & IDTI_OUTPUT_OPTION_BY_FIRE) ? 1 : 0;
+            int on = rt->alarm_active || (rt->fire_active && by_fire);
+            hal_set_output(module, slot + IDTI_SLOT_EVENT_BASE, on);
+        }
+    }
+
+    if (alarm_outputs == 0 && (rt->alarm_active || rt->fire_active))
+    {
+        log_msg("알람 릴레이: 동작 종류가 Alarm인 출력이 설정돼 있지 않다 - 움직일 출력이 없다");
+    }
+}
+
+/* 출력 설정이 새로 저장되면 net이 부른다 - 울리는 중이라면 대상이 바뀌었을 수 있다 */
+static void on_setting_changed(uint8_t object, void *user)
+{
+    if (object == IDTI_OBJ_OUTPUT)
+    {
+        apply_alarm_outputs((AcuRuntime *)user);
+    }
+}
+
+/*
  * 알람·화재 입력이 바뀌었는지 보고, 바뀌었으면 DM에 이벤트를 올린다.
  *
  * 주소 규칙 (2026-09-11 DM 회신, HARDWARE.md "이벤트 주소"):
@@ -144,7 +197,7 @@ static void report_rru_disconnected(AcuRuntime *rt, int rru)
  *         -> 입력 설정(Object 44)을 아직 받지 않으므로 지금은 `(0, 0)`
  *
  * 알람 릴레이는 **ACU가 구동한다** — RRU는 릴레이를 스스로 움직이지 않는다.
- * 어느 출력이 Alarm인지는 출력 설정(Object 45)을 받아야 알 수 있어, 지금은 mock이 흉내만 낸다.
+ * 어느 출력을 움직일지는 저장된 출력 설정(Object 45)을 보고 `apply_alarm_outputs()`가 정한다.
  */
 static void check_alarm_fire(AcuRuntime *rt)
 {
@@ -157,9 +210,9 @@ static void check_alarm_fire(AcuRuntime *rt)
         net_push_system_event(rt->net,
                               alarm ? IDTI_EVENT_ALARM_DETECTED : IDTI_EVENT_ALARM_RESTORED,
                               IDTI_EVENT_ADDR_FIRST_MODULE, IDTI_EVENT_ADDR_ALARM_READER);
-        hal_set_alarm_relays(alarm);
-        log_msg(alarm ? "알람 입력 동작 -> DM 보고 + 알람 릴레이 켬"
-                      : "알람 입력 복구 -> DM 보고 + 알람 릴레이 끔");
+        apply_alarm_outputs(rt);
+        log_msg(alarm ? "알람 입력 동작 -> DM 보고 + Alarm인 출력 동작"
+                      : "알람 입력 복구 -> DM 보고 + 출력 다시 계산");
     }
 
     if (fire != rt->fire_active)
@@ -168,7 +221,7 @@ static void check_alarm_fire(AcuRuntime *rt)
         net_push_system_event(rt->net,
                               fire ? IDTI_EVENT_FIRE_DETECTED : IDTI_EVENT_FIRE_RESTORED,
                               IDTI_EVENT_ADDR_NONE, IDTI_EVENT_ADDR_NONE);
-        hal_set_alarm_relays(fire);
+        apply_alarm_outputs(rt);
         /*
          * ⚠ **문을 여는 것은 우리가 하지 않는다.** 화재 시 전체 개방은 **DM 정책**이 처리하고,
          * DM이 강제 개방(Object 206) 명령을 내려보낸다 (2026-09-11 실측 4회 확인).
@@ -554,6 +607,7 @@ int main(int argc, char **argv)
 
     /* 강제 개방은 net이 상태를 들고, 실제 릴레이는 rt를 통해 HAL로 나간다 */
     net_set_force_open_handler(net, on_force_open_changed, &rt);
+    net_set_setting_changed_handler(net, on_setting_changed, &rt);
 
     if (net)
     {
@@ -651,6 +705,7 @@ int main(int argc, char **argv)
                         net_set_users(net, users);
                         net_set_settings_db(net, db);
                         net_set_force_open_handler(net, on_force_open_changed, &rt);
+                        net_set_setting_changed_handler(net, on_setting_changed, &rt);
                         apply_module_layout(net, &new_cfg);
                         net_attach_loop(net, loop);
                         log_msg("네트워크 포트 변경 적용됨 (재시작 없이 전환)");
