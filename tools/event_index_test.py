@@ -85,9 +85,10 @@ def main():
     # 앞선 시험이 남긴 이벤트가 있을 수 있다 - 지금 보관 건수를 기준으로 삼는다
     db = sqlite3.connect(a.events_db)
     base_total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    # 되돌림 기준 시각은 **이 시험이 시작한 때**로 잡는다 (한 시간 전으로 잡으면 앞 시험 이벤트까지 섞인다)
-    t_start = time.localtime(time.time() - 1)
-    time.sleep(1.2)
+    # 되돌림 기준 시각은 **이 시험이 시작한 때**로 잡는다 (한 시간 전으로 잡으면 앞 시험 이벤트까지 섞인다).
+    # 시각은 초 단위라, 앞 시험의 마지막 이벤트와 같은 초에 걸리지 않게 1초를 넘긴 뒤 **지금**을 기준으로 삼는다
+    time.sleep(1.1)
+    t_start = time.localtime(time.time())
 
     print("\n[1] 개수 조회")
     tap(a.fifo, 3)

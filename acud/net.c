@@ -1255,9 +1255,113 @@ static int request_slot(const IdtiHeader *hdr, int *out_module, int *out_slot)
     return 0;
 }
 
-/* 모듈 14칸 배치에서 이 자리가 입력·출력인지 (`22333333444433`) */
+/*
+ * ---- 장치 설정 (조회 Cmd 6 / Sub 2, 쓰기 Cmd 5 / Sub 5) ----
+ *
+ * 오브젝트마다 **크기와 "무엇 단위로 오는가"** 만 다르고 처리는 같다 —
+ * 받은 byte 그대로 저장하고, 조회에는 저장한 byte 그대로 돌려준다. 그래서 표 하나로 묶었다.
+ *
+ * 단위는 9/15 실제 DM 트래픽(Platinum「장치 정보 업데이트」)에서 읽었다:
+ *   컨트롤러  모듈 0 / 비트맵 0       0x29 0x2B 0x51 0x52 (0x53 한 번)
+ *   리더      모듈 1·2 × bit 0·1      0x2F (0x53 네 번)
+ *   입력      모듈 1·2 × bit 2~7·12·13  0x2C
+ *   출력      모듈 1·2 × bit 8~11     0x2D 0x54
+ */
+typedef enum {
+    SET_UNIT_CONTROLLER = 0,
+    SET_UNIT_READER,
+    SET_UNIT_INPUT,
+    SET_UNIT_OUTPUT,
+    SET_UNIT_CONTROLLER_OR_READER, /* 0x53 운영모드 스케줄 — 컨트롤러 전체용 한 칸 + 리더별 */
+} SettingUnit;
+
+typedef struct {
+    uint8_t     object;
+    size_t      len;
+    SettingUnit unit;
+    uint32_t    set_ok_event; /* 0이면 올리지 않는다 */
+    const char *name;
+} SettingSpec;
+
+static const SettingSpec SETTING_SPECS[] = {
+    { IDTI_OBJ_DEVICE,         IDTI_DEVICE_BASIS_LEN,   SET_UNIT_CONTROLLER,           IDTI_EVENT_DEVICE_SET_OK, "컨트롤러 기본설정" },
+    { IDTI_OBJ_CONTROLLER,     IDTI_CONTROLLER_LEN,     SET_UNIT_CONTROLLER,           0,                        "컨트롤러 장치설정" },
+    { IDTI_OBJ_INPUT,          IDTI_INPUT_SETTING_LEN,  SET_UNIT_INPUT,                IDTI_EVENT_INPUT_SET_OK,  "입력" },
+    { IDTI_OBJ_OUTPUT,         IDTI_OUTPUT_SETTING_LEN, SET_UNIT_OUTPUT,               IDTI_EVENT_OUTPUT_SET_OK, "출력" },
+    { IDTI_OBJ_CARD_READER,    IDTI_CARD_READER_LEN,    SET_UNIT_READER,               IDTI_EVENT_READER_SET_OK, "카드리더" },
+    { IDTI_OBJ_ALARM,          IDTI_ALARM_LEN,          SET_UNIT_CONTROLLER,           0,                        "알람" },
+    { IDTI_OBJ_ALARM_BELL_SCH, IDTI_ALARM_BELL_SCH_LEN, SET_UNIT_CONTROLLER,           0,                        "알람벨 스케줄" },
+    { IDTI_OBJ_OPMODE_SCH,     IDTI_OPMODE_SCH_LEN,     SET_UNIT_CONTROLLER_OR_READER, 0,                        "운영모드 스케줄" },
+    { IDTI_OBJ_DOORMODE_SCH,   IDTI_DOORMODE_SCH_LEN,   SET_UNIT_OUTPUT,               0,                        "도어모드 스케줄" },
+};
+
+static const SettingSpec *find_setting_spec(uint8_t object)
+{
+    for (size_t i = 0; i < sizeof(SETTING_SPECS) / sizeof(SETTING_SPECS[0]); i++)
+    {
+        if (SETTING_SPECS[i].object == object)
+        {
+            return &SETTING_SPECS[i];
+        }
+    }
+    return NULL;
+}
+
+/* 모듈 14칸 배치에서 이 자리가 무엇인지 (`22333333444433`) */
+static int slot_is_reader(int slot) { return slot == 0 || slot == 1; }
 static int slot_is_input(int slot)  { return (slot >= 2 && slot <= 7) || slot == 12 || slot == 13; }
 static int slot_is_output(int slot) { return slot >= 8 && slot <= 11; }
+
+/*
+ * 요청이 가리키는 저장 열쇠 (모듈, 칸)를 정한다.
+ * 반환: 0=성공, -1=이 오브젝트가 받을 수 없는 자리 (why에 이유)
+ */
+static int setting_key(const AcuNet *net, const IdtiHeader *hdr, const SettingSpec *spec,
+                       int *out_module, int *out_slot, const char **why)
+{
+    const uint8_t *b = hdr->dest_addr + IDTI_DEST_BITMAP_IDX;
+    int module = hdr->dest_addr[IDTI_DEST_MODULE_IDX];
+    int bitmap_empty = (b[0] | b[1] | b[2] | b[3]) == 0;
+
+    SettingUnit unit = spec->unit;
+    if (unit == SET_UNIT_CONTROLLER_OR_READER)
+    {
+        unit = (module == 0 && bitmap_empty) ? SET_UNIT_CONTROLLER : SET_UNIT_READER;
+    }
+
+    if (unit == SET_UNIT_CONTROLLER)
+    {
+        /* 컨트롤러 단위는 주소를 보지 않는다 — 실제 트래픽은 늘 모듈 0 / 비트맵 0이었다 */
+        *out_module = 0;
+        *out_slot = 0;
+        return 0;
+    }
+
+    int slot = 0;
+    if (request_slot(hdr, &module, &slot) != 0)
+    {
+        *why = "비트맵이 비었다";
+        return -1;
+    }
+    if (module < 1 || module > net->layout.module_count)
+    {
+        *why = "없는 모듈";
+        return -1;
+    }
+    int ok = (unit == SET_UNIT_READER) ? slot_is_reader(slot)
+           : (unit == SET_UNIT_INPUT)  ? slot_is_input(slot)
+           :                             slot_is_output(slot);
+    if (!ok)
+    {
+        *why = (unit == SET_UNIT_READER) ? "리더 자리가 아니다"
+             : (unit == SET_UNIT_INPUT)  ? "입력 자리가 아니다"
+             :                             "출력 자리가 아니다";
+        return -1;
+    }
+    *out_module = module;
+    *out_slot = slot;
+    return 0;
+}
 
 /* 설정 조회 응답 — SSC-324 캡처와 같은 모양으로 보낸다 */
 static void send_setting_response(AcuNet *net, const IdtiHeader *hdr,
@@ -1268,7 +1372,7 @@ static void send_setting_response(AcuNet *net, const IdtiHeader *hdr,
      *   Command/Sub  요청 그대로 되돌린다 (06 / 02)  <- 이벤트 응답(05)과 다르다
      *   StartItemIdx / EndItemIdx = FF FF
      *   Start/End/Count DataBlock = 1 / 1 / 1
-     *   OneDataBlockSize = 데이터 크기 (41 -> 13, 44 -> 21, 45 -> 14)
+     *   OneDataBlockSize = 데이터 크기
      */
     IdtiHeader h = *hdr;
     h.start_item = 0xFF;
@@ -1277,96 +1381,88 @@ static void send_setting_response(AcuNet *net, const IdtiHeader *hdr,
                   data, len, 1, 1, 1, (uint16_t)len);
 }
 
-/*
- * 장치 설정 조회 (Cmd 6 / Sub 2). 처리했으면 1.
- *   0x29 컨트롤러 기본설정 13byte
- *   0x2C 입력 21byte  /  0x2D 출력 14byte — 칸마다 따로 묻는다
- */
+static void send_fail_ack(AcuNet *net, const IdtiHeader *hdr)
+{
+    uint8_t ack = IDTI_ACK_FAIL;
+    send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+}
+
+/* 이벤트·로그에 쓰는 칸 번호 (컨트롤러 단위는 0) */
+static int display_slot(int module, int slot)
+{
+    return (module == 0) ? 0 : slot + IDTI_SLOT_EVENT_BASE;
+}
+
+/* 장치 설정 조회 (Cmd 6 / Sub 2). 처리했으면 1. */
 static int handle_setting_read(AcuNet *net, const IdtiHeader *hdr)
 {
     if (hdr->command != IDTI_CMD_REQ_DATA || hdr->sub_command != IDTI_SUBCMD_READ)
     {
         return 0;
     }
-    if (hdr->object != IDTI_OBJ_DEVICE && hdr->object != IDTI_OBJ_INPUT &&
-        hdr->object != IDTI_OBJ_OUTPUT)
+    const SettingSpec *spec = find_setting_spec(hdr->object);
+    if (!spec)
     {
         return 0;
     }
 
-    uint8_t block[IDTI_INPUT_SETTING_LEN];
-    char line[180];
-
-    if (hdr->object == IDTI_OBJ_DEVICE)
-    {
-        /*
-         * 컨트롤러 기본설정. DM이 바꿔 저장한 것이 있으면 그것을, 없으면 **기본값**을 돌려준다.
-         * 기본값의 종류·타입·주소는 우리 장치 자신이고, OperationMode 5 · Level FF는
-         * **현장 SSC-324 캡처값**이다 (DM 회신 3-1). 이 셋이 없는 컨트롤러는 없으므로
-         * 입력·출력과 달리 "저장된 것 없음"으로 실패시키지 않는다.
-         */
-        int rc = devset_get(net->settings_db, IDTI_OBJ_DEVICE, 0, 0, block, IDTI_DEVICE_BASIS_LEN);
-        if (rc != 1)
-        {
-            memset(block, 0, IDTI_DEVICE_BASIS_LEN);
-            block[IDTI_BASIS_OFF_CATEGORY] = (uint8_t)net->device_category;
-            block[IDTI_BASIS_OFF_TYPE]     = (uint8_t)net->device_type;
-            block[IDTI_BASIS_OFF_ADDRESS]  = 0x01;
-            block[IDTI_BASIS_OFF_OPMODE]   = 0x05; /* SSC-324 캡처값 */
-            block[IDTI_BASIS_OFF_LEVEL]    = 0xFF; /* SSC-324 캡처값 */
-        }
-        send_setting_response(net, hdr, block, IDTI_DEVICE_BASIS_LEN);
-        log_msg(rc == 1 ? "네트워크: 컨트롤러 기본설정 조회 -> 저장값"
-                        : "네트워크: 컨트롤러 기본설정 조회 -> 기본값");
-        return 1;
-    }
-
+    uint8_t block[64];
     int module = 0, slot = 0;
-    int is_input = (hdr->object == IDTI_OBJ_INPUT);
-    size_t len = is_input ? IDTI_INPUT_SETTING_LEN : IDTI_OUTPUT_SETTING_LEN;
+    const char *why = NULL;
+    char line[200];
 
-    if (request_slot(hdr, &module, &slot) != 0 ||
-        module < 1 || module > net->layout.module_count ||
-        !(is_input ? slot_is_input(slot) : slot_is_output(slot)))
+    if (setting_key(net, hdr, spec, &module, &slot, &why) != 0)
     {
-        uint8_t ack = IDTI_ACK_FAIL;
-        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
-        snprintf(line, sizeof(line), "네트워크: %s 설정 조회 - 없는 칸 (모듈 %d, 칸 %d) -> Fail",
-                 is_input ? "입력" : "출력", module, slot);
+        send_fail_ack(net, hdr);
+        snprintf(line, sizeof(line), "네트워크: %s 조회 - %s -> Fail", spec->name, why);
         log_msg(line);
         return 1;
     }
 
-    int rc = devset_get(net->settings_db, hdr->object, module, slot, block, len);
+    int rc = devset_get(net->settings_db, spec->object, module, slot, block, spec->len);
+
+    if (rc != 1 && spec->object == IDTI_OBJ_DEVICE)
+    {
+        /*
+         * 컨트롤러 기본설정만은 저장된 것이 없어도 **기본값**으로 답한다.
+         * 종류·타입·주소는 우리 장치 자신이고 OperationMode 5 · Level FF는 SSC-324 캡처값이다.
+         */
+        memset(block, 0, IDTI_DEVICE_BASIS_LEN);
+        block[IDTI_BASIS_OFF_CATEGORY] = (uint8_t)net->device_category;
+        block[IDTI_BASIS_OFF_TYPE]     = (uint8_t)net->device_type;
+        block[IDTI_BASIS_OFF_ADDRESS]  = 0x01;
+        block[IDTI_BASIS_OFF_OPMODE]   = 0x05;
+        block[IDTI_BASIS_OFF_LEVEL]    = 0xFF;
+        send_setting_response(net, hdr, block, IDTI_DEVICE_BASIS_LEN);
+        log_msg("네트워크: 컨트롤러 기본설정 조회 -> 기본값");
+        return 1;
+    }
+
     if (rc != 1)
     {
         /*
-         * **저장된 것이 없으면 Fail로 답한다 — 0으로 채워 보내지 않는다.**
-         * Platinum 「장치 정보 업데이트」는 읽은 값을 자기 DB에 저장한다. 운영자가 DM에서 설정해 둔
-         * 칸을 우리가 아직 못 받았는데 0을 돌려주면, **DM 쪽 설정이 0으로 덮어써진다.**
-         * 실패로 두면 DM 설정은 남는다 (DM 검증보고서 5-2: Fail은 "그 자리에 데이터 없음"이라는 정상 응답).
+         * **저장된 것이 없으면 Fail — 0으로 채워 보내지 않는다.**
+         * Platinum 「장치 정보 업데이트」는 읽은 값을 자기 DB에 저장한다. 아직 못 받은 칸에 0을 돌려주면
+         * DM 쪽 설정이 0으로 덮어써진다. Fail은 "그 자리에 데이터 없음"이라는 정상 응답이다.
          */
-        uint8_t ack = IDTI_ACK_FAIL;
-        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
-        snprintf(line, sizeof(line), "네트워크: %s 설정 조회 (모듈 %d, 칸 %d) -> 저장된 것 없음, Fail",
-                 is_input ? "입력" : "출력", module, slot);
+        send_fail_ack(net, hdr);
+        snprintf(line, sizeof(line), "네트워크: %s 조회 (모듈 %d, 칸 %d) -> 저장된 것 없음, Fail",
+                 spec->name, module, display_slot(module, slot));
         log_msg(line);
         return 1;
     }
 
-    send_setting_response(net, hdr, block, len);
-    snprintf(line, sizeof(line), "네트워크: %s 설정 조회 (모듈 %d, 칸 %d) -> %zubyte",
-             is_input ? "입력" : "출력", module, slot, len);
+    send_setting_response(net, hdr, block, spec->len);
+    snprintf(line, sizeof(line), "네트워크: %s 조회 (모듈 %d, 칸 %d) -> %zubyte",
+             spec->name, module, display_slot(module, slot), spec->len);
     log_msg(line);
     return 1;
 }
 
 /*
- * 장치 설정 쓰기 (Cmd 5 SendData / Sub 5 Change). 처리했으면 1.
- *   0x2C 입력 21byte  /  0x2D 출력 14byte — 칸마다 따로 온다 (DM 회신: "현장 동작은 한 칸씩")
- *
- * **받은 byte 그대로 저장하고, 저장에 성공했을 때만** 설정 성공 이벤트를 올린다.
- * 9/14에 DM이 "쓰기 성공"을 잘못 적은 이유가 바로 이 표식이 없었기 때문이다.
+ * 장치 설정 쓰기 (Cmd 5 / Sub 5). 처리했으면 1.
+ * **받은 byte 그대로 저장하고, 저장에 성공했을 때만** 설정 성공 이벤트를 올린다
+ * (코드표에 짝이 있는 오브젝트만 — 새 코드를 만들 수 없다).
  */
 static int handle_setting_write(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
@@ -1374,34 +1470,25 @@ static int handle_setting_write(AcuNet *net, const IdtiHeader *hdr, const uint8_
     {
         return 0;
     }
-    if (hdr->object != IDTI_OBJ_INPUT && hdr->object != IDTI_OBJ_OUTPUT)
+    const SettingSpec *spec = find_setting_spec(hdr->object);
+    if (!spec)
     {
         return 0;
     }
 
-    int is_input = (hdr->object == IDTI_OBJ_INPUT);
-    size_t want_len = is_input ? IDTI_INPUT_SETTING_LEN : IDTI_OUTPUT_SETTING_LEN;
     const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;
     int module = 0, slot = 0;
     const char *why = NULL;
 
-    if (hdr->data_len < want_len)
+    if (hdr->data_len < spec->len)
     {
         why = "데이터가 짧다";
     }
-    else if (request_slot(hdr, &module, &slot) != 0)
+    else if (setting_key(net, hdr, spec, &module, &slot, &why) != 0)
     {
-        why = "비트맵이 비었다";
+        /* why는 setting_key가 채웠다 */
     }
-    else if (module < 1 || module > net->layout.module_count)
-    {
-        why = "없는 모듈";
-    }
-    else if (!(is_input ? slot_is_input(slot) : slot_is_output(slot)))
-    {
-        why = is_input ? "입력 자리가 아니다" : "출력 자리가 아니다";
-    }
-    else if (devset_put(net->settings_db, hdr->object, module, slot, data, want_len) != 0)
+    else if (devset_put(net->settings_db, spec->object, module, slot, data, spec->len) != 0)
     {
         why = "저장 실패";
     }
@@ -1409,30 +1496,33 @@ static int handle_setting_write(AcuNet *net, const IdtiHeader *hdr, const uint8_
     uint8_t ack = why ? IDTI_ACK_FAIL : IDTI_ACK_SUCCESS;
     send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
 
-    char line[200];
+    char line[220];
     if (why)
     {
-        snprintf(line, sizeof(line), "네트워크: %s 설정 쓰기 (모듈 %d, 칸 %d) -> Fail (%s)",
-                 is_input ? "입력" : "출력", module, slot + IDTI_SLOT_EVENT_BASE, why);
+        snprintf(line, sizeof(line), "네트워크: %s 쓰기 (모듈 %d, 칸 %d) -> Fail (%s)",
+                 spec->name, module, display_slot(module, slot), why);
         log_msg(line);
         return 1;
     }
 
-    net_push_system_event(net, is_input ? IDTI_EVENT_INPUT_SET_OK : IDTI_EVENT_OUTPUT_SET_OK,
-                          module, slot + IDTI_SLOT_EVENT_BASE);
+    if (spec->set_ok_event)
+    {
+        net_push_system_event(net, spec->set_ok_event, module, display_slot(module, slot));
+    }
 
-    if (!is_input)
+    if (spec->object == IDTI_OBJ_OUTPUT)
     {
         snprintf(line, sizeof(line),
                  "네트워크: 출력 설정 저장 (모듈 %d, 칸 %d) - 동작 종류 %u%s%s",
-                 module, slot + IDTI_SLOT_EVENT_BASE, data[IDTI_OUTPUT_OFF_ACTIVE_TYPE],
+                 module, display_slot(module, slot), data[IDTI_OUTPUT_OFF_ACTIVE_TYPE],
                  data[IDTI_OUTPUT_OFF_ACTIVE_TYPE] == IDTI_OUTPUT_ACTIVE_TYPE_ALARM ? "(Alarm)" : "",
                  (data[IDTI_OUTPUT_OFF_ACTIVE_OPTION] & IDTI_OUTPUT_OPTION_BY_FIRE) ? " · 화재로 동작" : "");
     }
     else
     {
-        snprintf(line, sizeof(line), "네트워크: 입력 설정 저장 (모듈 %d, 칸 %d) - 용도 %u",
-                 module, slot + IDTI_SLOT_EVENT_BASE, data[6]);
+        snprintf(line, sizeof(line), "네트워크: %s 저장 (모듈 %d, 칸 %d)%s",
+                 spec->name, module, display_slot(module, slot),
+                 spec->set_ok_event ? "" : " - 설정 성공 이벤트는 코드표에 없어 올리지 않음");
     }
     log_msg(line);
 

@@ -165,10 +165,29 @@
 #define IDTI_OBJ_DOORMODE_SCH    0x54 /*  84 도어모드 스케줄 */
 #define IDTI_OBJ_GROUP_APPLY     0xA6 /* 166 엑세스그룹 적용 (0x2F와 헷갈렸던 번호) */
 
-/* 설정 데이터 블록 크기 — SSC-324 캡처의 OneDataBlockSize (DM 회신 3절) */
-#define IDTI_DEVICE_BASIS_LEN  13 /* 0x29 */
-#define IDTI_INPUT_SETTING_LEN 21 /* 0x2C */
-#define IDTI_OUTPUT_SETTING_LEN 14 /* 0x2D */
+/*
+ * 설정 데이터 블록 크기.
+ * 0x29·0x2C·0x2D는 **SSC-324 캡처의 OneDataBlockSize**(DM 9/14 회신 3절)이고,
+ * 나머지는 **SDK 소스(`clsDevDeviceSetting.cs`·`clsDevDeviceSchedule.cs`)의 필드 길이 합**이다.
+ * SDK 합이 캡처 세 개와 정확히 같아(13·21·14) 나머지도 믿을 수 있다고 봤다.
+ */
+#define IDTI_DEVICE_BASIS_LEN     13 /* 0x29 캡처 */
+#define IDTI_CONTROLLER_LEN       24 /* 0x2B AccessOption4 Reserved2 TcpIP4 TcpPort2 BPS1 Password4 Level1 Duress1 DuressKey1 Reserved4 */
+#define IDTI_INPUT_SETTING_LEN    21 /* 0x2C 캡처 */
+#define IDTI_OUTPUT_SETTING_LEN   14 /* 0x2D 캡처 */
+#define IDTI_CARD_READER_LEN      32 /* 0x2F Proximity: Type1 Wiegand1 AccessOption4 ReactMod1 ReactDev1 Reserved7 Level1 APBLink8 Reserved8 */
+#define IDTI_ALARM_LEN            21 /* 0x51 TurnOff1 ActiveTime1 동작종류 11 ShuntStart2 ShuntEnd2 Reserved4 */
+#define IDTI_ALARM_BELL_SCH_LEN   16 /* 0x52 (TZ2 ActiveTime1 Reserved1) x 4 */
+#define IDTI_OPMODE_SCH_LEN        7 /* 0x53 TZ2 OPMode1 Reserved4 */
+#define IDTI_DOORMODE_SCH_LEN      7 /* 0x54 TZ2 DoorMode1 Reserved4 */
+
+/*
+ * 설정 쓰기 성공 이벤트 가운데 **코드표 이름으로 짝지은 것** (`dm/event_codes_all.csv`, `10xx0301` 꼴).
+ * ⚠ 현장 기록으로 확인한 것은 Input·Output 둘뿐이고, Device·Reader는 이름이 같아서 짝지었다.
+ * 컨트롤러 장치·알람·스케줄은 코드표에 없어 **올리지 않는다** — 새 코드를 만들 수 없다.
+ */
+#define IDTI_EVENT_DEVICE_SET_OK 0x101F0301u /* Data > Device > Change > Success */
+#define IDTI_EVENT_READER_SET_OK 0x10230301u /* Data > Reader > Change > Success */
 
 /*
  * 컨트롤러 기본설정 13byte 배치 (DM 회신 3-1, SSC-324 캡처 `03 21 01 05 FF 00 00 00 00 00 00 00 00`).
