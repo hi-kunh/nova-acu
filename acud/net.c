@@ -1443,6 +1443,108 @@ static int handle_setting_write(AcuNet *net, const IdtiHeader *hdr, const uint8_
     return 1;
 }
 
+/* BCD 6byte(YYMMDDhhmmss)를 시각으로. 틀린 값이면 -1 */
+static time_t bcd6_to_time(const uint8_t *b)
+{
+    struct tm tmv;
+    memset(&tmv, 0, sizeof(tmv));
+    int yy = idti_from_bcd(b[0]), mo = idti_from_bcd(b[1]), dd = idti_from_bcd(b[2]);
+    int hh = idti_from_bcd(b[3]), mi = idti_from_bcd(b[4]), ss = idti_from_bcd(b[5]);
+    if (yy < 0 || mo < 1 || mo > 12 || dd < 1 || dd > 31 || hh < 0 || hh > 23 ||
+        mi < 0 || mi > 59 || ss < 0 || ss > 59)
+    {
+        return (time_t)-1;
+    }
+    tmv.tm_year = 2000 + yy - 1900;
+    tmv.tm_mon = mo - 1;
+    tmv.tm_mday = dd;
+    tmv.tm_hour = hh;
+    tmv.tm_min = mi;
+    tmv.tm_sec = ss;
+    tmv.tm_isdst = -1;
+    return mktime(&tmv);
+}
+
+/*
+ * 이벤트 보관 명령 3종 (SDK 정의값, protocol.h 설명). 처리했으면 1.
+ *
+ * ⚠ **의미는 규약에 없다** (개수가 전체인지 미전송인지, 리셋이 삭제인지 — DM도 "장비 동작"이라 모른다).
+ *   그래서 **되돌릴 수 있는 쪽**으로 정했다:
+ *     개수   = **미전송 건수** (폴링이 앞으로 받을 수)
+ *     리셋   = **보낸 것으로 표시**, 지우지 않는다 (출입 기록은 증거다)
+ *     인덱스 = 타입 3(지정 시각부터)만 한다. 타입 4(구간)·그 밖은 **Fail** —
+ *              끝 시각을 무시하고 Success를 주면 DM이 경고한 "거짓 성공"이 된다
+ */
+static int handle_event_store_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
+{
+    const uint8_t *data = pkt + IDTI_HEADER_LEN_V2;
+    char line[200];
+
+    /* EventCountCheck — 6 / 2 / 0x05 */
+    if (hdr->command == IDTI_CMD_REQ_DATA && hdr->sub_command == IDTI_SUBCMD_READ &&
+        hdr->object == IDTI_OBJ_HISTORY_COUNT)
+    {
+        long long pending = net->events ? events_pending(net->events) : 0;
+        if (pending < 0)
+        {
+            pending = 0;
+        }
+        uint8_t body[IDTI_EVENT_COUNT_LEN];
+        memset(body, 0, sizeof(body));
+        body[0] = (uint8_t)(pending >> 24);
+        body[1] = (uint8_t)(pending >> 16);
+        body[2] = (uint8_t)(pending >> 8);
+        body[3] = (uint8_t)pending;
+        send_setting_response(net, hdr, body, sizeof(body));
+
+        snprintf(line, sizeof(line), "네트워크: 이벤트 개수 조회 -> 미전송 %lld건", pending);
+        log_msg(line);
+        return 1;
+    }
+
+    /* EventIndexChange — 3 / 5 / 0x06 */
+    if (hdr->command == IDTI_CMD_SND_STATUS && hdr->sub_command == IDTI_SUBCMD_CHANGE &&
+        hdr->object == IDTI_OBJ_HISTORY_INDEX)
+    {
+        uint8_t ack = IDTI_ACK_FAIL;
+        int type = (hdr->data_len >= IDTI_EVENT_INDEX_LEN) ? data[IDTI_EVENT_INDEX_OFF_TYPE] : -1;
+
+        if (type == IDTI_EVENT_INDEX_TYPE_FROM_TIME && net->events)
+        {
+            time_t from = bcd6_to_time(data + IDTI_EVENT_INDEX_OFF_START);
+            if (from != (time_t)-1 && events_rewind_to_time(net->events, from) >= 0)
+            {
+                ack = IDTI_ACK_SUCCESS;
+            }
+            snprintf(line, sizeof(line), "네트워크: 이벤트 인덱스 변경 타입 3(지정 시각부터) -> %s",
+                     ack == IDTI_ACK_SUCCESS ? "Success" : "Fail (시각이 틀렸다)");
+        }
+        else
+        {
+            snprintf(line, sizeof(line),
+                     "네트워크: 이벤트 인덱스 변경 타입 %d -> Fail (타입 3만 구현, 나머지는 형식 확인 대기)",
+                     type);
+        }
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        log_msg(line);
+        return 1;
+    }
+
+    /* EventReset — 3 / 6 / 0x01 */
+    if (hdr->command == IDTI_CMD_SND_STATUS && hdr->sub_command == IDTI_SUBCMD_INIT &&
+        hdr->object == IDTI_OBJ_HISTORY)
+    {
+        uint8_t ack = (net->events && events_mark_all_sent(net->events) == 0)
+                      ? IDTI_ACK_SUCCESS : IDTI_ACK_FAIL;
+        send_response(net, hdr, hdr->command, hdr->sub_command, hdr->object, &ack, 1, 1, 1, 1, 1);
+        log_msg(ack == IDTI_ACK_SUCCESS ? "네트워크: 이벤트 리셋 -> Success (보낸 것으로 표시, 지우지 않음)"
+                                        : "네트워크: 이벤트 리셋 -> Fail");
+        return 1;
+    }
+
+    return 0;
+}
+
 static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pkt)
 {
     /*
@@ -1489,6 +1591,11 @@ static void handle_request(AcuNet *net, const IdtiHeader *hdr, const uint8_t *pk
     }
 
     if (handle_setting_write(net, hdr, pkt))
+    {
+        return;
+    }
+
+    if (handle_event_store_request(net, hdr, pkt))
     {
         return;
     }

@@ -52,8 +52,8 @@
 
 /* Object Table (일부) - 근거: PC 소스 `isldev/clsDevCommand.cs`의 DeviceObject enum */
 #define IDTI_OBJ_HISTORY       0x01 /* Event log */
-#define IDTI_OBJ_HISTORY_COUNT 0x05 /* 이벤트 개수 (아직 미구현) */
-#define IDTI_OBJ_HISTORY_INDEX 0x06 /* 이벤트 읽기 위치 (아직 미구현) */
+#define IDTI_OBJ_HISTORY_COUNT 0x05 /* 이벤트 개수 */
+#define IDTI_OBJ_HISTORY_INDEX 0x06 /* 이벤트 읽기 위치 (Restore Event log) */
 #define IDTI_OBJ_FIRMWARE      0x2A /* 42. PC가 접속 후 장치 상태를 물을 때 쓰는 오브젝트 */
 #define IDTI_OBJ_LCD_CONTROL   0x31 /* 49. LCD 백라이트/날짜 형식. 우리 장비에는 LCD가 없다 */
 #define IDTI_OBJ_MULTI_LANGUAGE 0xA5 /* 165. LCD 표시 언어. 우리 장비에는 LCD가 없다 */
@@ -111,6 +111,27 @@
  * 설정이 **장비에 실제로 들어갔다**는 표식 (DM 9/11 회신: "서버가 확인하는 유일한 표식").
  * 주소는 (모듈, **칸 번호 1부터**) — 현장 기록 `10210301 → (1,14)`, `10220301 → (1,9)(1,10)(2,11)`.
  */
+/*
+ * 이벤트 보관 명령 3종 — **SDK 소스(`isldev/clsDevCommand.cs`, `clsDevEvent.cs`)의 정의값**.
+ *   EventCountCheck   Cmd 6 RequestData / Sub 2 Read   / Obj 0x05 HistoryCount
+ *                     -> Data 36 = Count(4) + Reserve(32)
+ *   EventIndexChange  Cmd 3 SendStatus  / Sub 5 Change / Obj 0x06 HistoryIndex
+ *                     Data 36 = Reserve(1) + Type(1) + Offset(4) + StartDate(6) + EndDate(6) + Reserve(18)
+ *                     -> Value(1)
+ *   EventReset        Cmd 3 SendStatus  / Sub 6 Init   / Obj 0x01 History -> Value(1)
+ *
+ * DM 회신(9/14 6절): 현장 SSC-324가 **읽기 인덱스가 쓰기 위치보다 앞서** 이벤트를 하나도 못 올렸고,
+ * 이 셋이 **없으면 현장에서 복구할 방법이 없다.** Index 타입 3 = 지정 시각부터, 4 = 시작~끝 구간.
+ */
+#define IDTI_EVENT_COUNT_LEN          36
+#define IDTI_EVENT_INDEX_LEN          36
+#define IDTI_EVENT_INDEX_OFF_TYPE      1
+#define IDTI_EVENT_INDEX_OFF_OFFSET    2 /* 4 */
+#define IDTI_EVENT_INDEX_OFF_START     6 /* 6, BCD YYMMDDhhmmss */
+#define IDTI_EVENT_INDEX_OFF_END      12 /* 6 */
+#define IDTI_EVENT_INDEX_TYPE_FROM_TIME 3
+#define IDTI_EVENT_INDEX_TYPE_RANGE     4
+
 #define IDTI_EVENT_INPUT_SET_OK  0x10210301u /* Data > Input  > Change > Success */
 #define IDTI_EVENT_OUTPUT_SET_OK 0x10220301u /* Data > Output > Change > Success */
 

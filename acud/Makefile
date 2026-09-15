@@ -26,11 +26,16 @@ users_test: ../tools/users_test.c users.c log.c
 	$(CC) $(CFLAGS) -o users_test ../tools/users_test.c users.c log.c -lsqlite3
 
 # ACU↔RRU 프로토콜 문서의 프레임 규칙·참조 코드 검산 (tools/rru_proto_check.c)
-rrucheck: rru_proto_check
+rrucheck: rru_proto_check events_wrap_test
 rru_proto_check: ../tools/rru_proto_check.c
 	$(CC) $(CFLAGS) -o rru_proto_check ../tools/rru_proto_check.c
+
+# 이벤트 링 삭제 경계에서 읽기 위치 검사 (tools/events_wrap_test.c)
+wraptest: events_wrap_test
+events_wrap_test: ../tools/events_wrap_test.c events.c log.c
+	$(CC) $(CFLAGS) -o events_wrap_test ../tools/events_wrap_test.c events.c log.c -lsqlite3
 
 clean:
 	rm -f $(TARGET) events_bench users_bench users_test rru_proto_check
 
-.PHONY: run bench usersbench userstest rrucheck clean
+.PHONY: run bench usersbench userstest rrucheck wraptest clean

@@ -76,6 +76,7 @@ static const char *PRAGMA_SQL =
     "PRAGMA foreign_keys=ON;";
 
 /* 준비된 문 하나를 돌려 정수 하나를 읽는다 (정의는 아래) */
+int events_repair_index(AcuEvents *ev);
 static long long scalar_with(AcuEvents *ev, sqlite3_stmt *st, long long def);
 
 static void switch_to_memory(AcuEvents *ev, const char *why)
@@ -192,6 +193,8 @@ AcuEvents *events_open(const char *path, long long capacity)
         return ev;
     }
 
+    events_repair_index(ev); /* 지난번에 어긋난 채로 꺼졌을 수 있다 */
+
     long long total = events_total(ev);
     long long pending = events_pending(ev);
     char line[320];
@@ -302,6 +305,14 @@ int events_append(AcuEvents *ev, const AcuEvent *e)
         return 0;
     }
 
+    /*
+     * **쓰기 직전에** 읽기 위치를 검사한다.
+     * 가져갈 때(fetch) 검사하면 이미 늦다 — 어긋난 동안 들어온 이벤트까지 "끝까지 읽음"으로
+     * 덮어써 **잃는다**(시험으로 확인했다). 쓰기 전에 되돌리면 이번에 쓰는 이벤트는 반드시
+     * 미전송으로 남는다. 인덱스 조회 두 번이라 비용은 무시할 만하다.
+     */
+    events_repair_index(ev);
+
     sqlite3_reset(ev->st_append);
     sqlite3_clear_bindings(ev->st_append);
     sqlite3_bind_int64(ev->st_append, 1, (sqlite3_int64)e->event_code);
@@ -377,6 +388,15 @@ int events_fetch(AcuEvents *ev, AcuEvent *out, int max)
         n++;
     }
     sqlite3_reset(ev->st_fetch);
+
+    /*
+     * 보낼 것이 없다고 나올 때만 위치를 검사한다 (매번 하면 폴링마다 질의가 늘어난다).
+     * "없다"가 진짜 없는 것인지, 위치가 앞서 나가 못 보는 것인지를 여기서 가른다.
+     */
+    if (n == 0 && events_repair_index(ev) == 1)
+    {
+        return events_fetch(ev, out, max);
+    }
     return n;
 }
 
@@ -486,4 +506,104 @@ long long events_total(const AcuEvents *ev)
     }
     long long min_seq = scalar_with(m, m->st_min, 1);
     return max_seq - min_seq + 1; /* 앞에서만 지우므로 중간에 구멍이 없다 */
+}
+
+
+/* ---- 읽기 위치 관리 (EventIndexChange / EventReset, 고장 복구) ---- */
+
+/* 전송 위치를 값 그대로 쓴다 (앞으로만 가는 events_ack와 달리 뒤로도 간다) */
+static int set_sent_seq(AcuEvents *ev, long long value)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(ev->db, "UPDATE event_state SET value=? WHERE key='sent_seq'",
+                           -1, &st, NULL) != SQLITE_OK)
+    {
+        return -1;
+    }
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)value);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int events_repair_index(AcuEvents *ev)
+{
+    if (!ev || !ev->db)
+    {
+        return 0; /* 메모리 모드에는 따로 된 위치가 없다 */
+    }
+
+    long long max_seq = scalar_with(ev, ev->st_max, 0);
+    long long sent = scalar_with(ev, ev->st_sent, 0);
+
+    if (sent <= max_seq)
+    {
+        return 0;
+    }
+
+    char line[200];
+    snprintf(line, sizeof(line),
+             "이벤트 저장: 읽기 위치(%lld)가 쓰기 위치(%lld)보다 앞서 있다 - 되돌린다 "
+             "(현장 SSC-324에서 이벤트가 끊겼던 그 상태)", sent, max_seq);
+    log_msg(line);
+
+    return (set_sent_seq(ev, max_seq) == 0) ? 1 : -1;
+}
+
+long long events_rewind_to_time(AcuEvents *ev, time_t from)
+{
+    if (!ev || !ev->db)
+    {
+        return -1;
+    }
+
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(ev->db, "SELECT MIN(seq) FROM events WHERE ts >= ?",
+                           -1, &st, NULL) != SQLITE_OK)
+    {
+        return -1;
+    }
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)from);
+
+    long long first = 0;
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL)
+    {
+        first = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+
+    long long max_seq = scalar_with(ev, ev->st_max, 0);
+    long long target = (first > 0) ? first - 1 : max_seq; /* 그 뒤 이벤트가 없으면 끝으로 */
+
+    if (set_sent_seq(ev, target) != 0)
+    {
+        return -1;
+    }
+
+    long long again = max_seq - target;
+    char line[200];
+    snprintf(line, sizeof(line), "이벤트 저장: 읽기 위치를 되돌렸다 - %lld건을 다시 보낸다", again);
+    log_msg(line);
+    return again;
+}
+
+int events_mark_all_sent(AcuEvents *ev)
+{
+    if (!ev)
+    {
+        return -1;
+    }
+    if (!ev->db)
+    {
+        ev->mem_head = 0;
+        ev->mem_count = 0;
+        return 0;
+    }
+    long long max_seq = scalar_with(ev, ev->st_max, 0);
+    if (set_sent_seq(ev, max_seq) != 0)
+    {
+        return -1;
+    }
+    log_msg("이벤트 저장: 모든 이벤트를 보낸 것으로 표시했다 (지우지는 않는다)");
+    return 0;
 }

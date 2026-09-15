@@ -71,6 +71,31 @@ long long events_pending(const AcuEvents *ev);
 /* 저장소에 남아 있는 총 건수. 오류면 -1 */
 long long events_total(const AcuEvents *ev);
 
+/*
+ * **읽기 위치를 검사하고 어긋났으면 바로잡는다.**
+ *
+ * 현장 SSC-324에서 실제로 난 고장이다 (DM 9/14 회신 6절): 읽기 인덱스가 쓰기 위치보다 앞서 나가
+ * "새 이벤트 없음"이라고 답하면서 **이벤트를 하나도 올리지 못했다.** 우리 구조에서는
+ * `전송 위치 > 가장 새 번호`가 그 상태다 — DB를 갈아 끼우거나 복구했을 때 생길 수 있고,
+ * 그대로 두면 새 이벤트가 그 번호를 넘을 때까지 **아무것도 보내지 않는다.**
+ * 반환: 1=바로잡음, 0=정상, -1=오류
+ */
+int events_repair_index(AcuEvents *ev);
+
+/*
+ * 읽기 위치를 **지정 시각 이후의 첫 이벤트 앞**으로 옮긴다 (EventIndexChange 타입 3).
+ * 그 시각 이후 이벤트가 다시 올라간다. 반환: 다시 보낼 건수(0 이상), 오류면 -1
+ */
+long long events_rewind_to_time(AcuEvents *ev, time_t from);
+
+/*
+ * 모든 이벤트를 **보낸 것으로 표시**한다 (EventReset).
+ * ⚠ 지우지 않는다 — 출입 기록은 되돌릴 수 없는 증거라, 필요하면 `events_rewind_to_time()`으로
+ *   되살릴 수 있게 둔다. 링 삭제 한도는 그대로 적용된다.
+ * 반환: 0=성공, -1=실패
+ */
+int events_mark_all_sent(AcuEvents *ev);
+
 /* 메모리 전용 모드인지 (1=저장 안 됨). 로그·상태 표시용 */
 int events_is_memory_only(const AcuEvents *ev);
 
