@@ -82,14 +82,21 @@ def main():
     while poll(P):
         pass
 
+    # 앞선 시험이 남긴 이벤트가 있을 수 있다 - 지금 보관 건수를 기준으로 삼는다
+    db = sqlite3.connect(a.events_db)
+    base_total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    # 되돌림 기준 시각은 **이 시험이 시작한 때**로 잡는다 (한 시간 전으로 잡으면 앞 시험 이벤트까지 섞인다)
+    t_start = time.localtime(time.time() - 1)
+    time.sleep(1.2)
+
     print("\n[1] 개수 조회")
     tap(a.fifo, 3)
     want("카드 3장 뒤 개수", count(P), 3)
     want("폴링으로 받은 건수", poll(P), 3)
     want("받은 뒤 개수", count(P), 0)
 
-    print("\n[2] 타입 3 — 지정 시각부터 다시")
-    t = time.localtime(time.time() - 3600)  # 한 시간 전부터
+    print("\n[2] 타입 3 — 이 시험이 시작한 시각부터 다시")
+    t = t_start
     start = b"".join(bcd(x) for x in (t.tm_year % 100, t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec))
     want("응답", index_change(P, 3, start), b"\x01")
     want("되돌린 뒤 개수", count(P), 3)
@@ -105,8 +112,7 @@ def main():
     want("리셋 전 개수", count(P), 2)
     want("리셋 응답", ask(P, 0x03, 0x06, 0x01), b"\x01")
     want("리셋 뒤 개수", count(P), 0)
-    db = sqlite3.connect(a.events_db)
-    want("지워지지 않았다(보관 건수)", db.execute("SELECT COUNT(*) FROM events").fetchone()[0], 5)
+    want("지워지지 않았다(보관 건수)", db.execute("SELECT COUNT(*) FROM events").fetchone()[0], base_total + 5)
     want("타입 3으로 되살아난다", (index_change(P, 3, start), count(P)), (b"\x01", 5))
     while poll(P):
         pass
@@ -118,6 +124,9 @@ def main():
     print(f"    · 쓰기 위치 {mx}, 읽기 위치를 {mx + 100}으로 밀어 둠")
     tap(a.fifo, 1)
     want("새 카드가 그래도 올라온다", poll(P), 1)
+    # 응답은 전송 위치를 기록하기 **전에** 나간다(잃는 것보다 겹치는 편이 낫다는 설계).
+    # 느린 eMMC에서는 기록이 몇 ms 뒤라, 바로 읽으면 한 칸 뒤처진 값이 보인다
+    time.sleep(0.5)
     sent = db.execute("SELECT value FROM event_state WHERE key='sent_seq'").fetchone()[0]
     mx2 = db.execute("SELECT MAX(seq) FROM events").fetchone()[0]
     want("읽기 위치 == 쓰기 위치", sent, mx2)
