@@ -83,7 +83,13 @@ ACU 프로젝트의 진행 상황과 남은 일 정리.
   - **펌웨어 업데이트 설치·되돌림** — 결정 8건 대기
   - `0xA6` 그룹 적용 — SSC-324도 실패 중
 
-  **매일 아침**: 보드 전원·`systemctl is-active acud` → `ls dm/ rru/ update/`로 새 회신 확인 → 그날 작업
+  **매일 아침**: 보드 전원·`systemctl is-active acud` → **`git -C dm pull`** 로 DM 새 회신 받기 → `ls rru/ update/` → 그날 작업
+
+  **📁 dm/ 은 2026-09-15부터 별도 저장소 `git@github.com:hi-kunh/nova-dm.git` (submodule)**
+  - DM 쪽이 직접 읽고 쓰도록 뗐다. DM에는 **그 저장소에만** 배포키(쓰기)를 준다 — nova-acu 코드·설계는 보이지 않는다
+  - 우리가 문서를 쓸 때: `cd dm && git add … && git commit && git push` → nova-acu에서 `git add dm && git commit`(submodule 위치 갱신)
+  - DM 회신 받을 때: `git -C dm pull` → nova-acu에서 `git add dm && git commit`
+  - 처음 받는 PC: `git clone --recurse-submodules git@github.com:hi-kunh/nova-acu.git` (이미 받았으면 `git submodule update --init`)
 
   **9/15 오전까지 끝낸 것** (상세는 README 9/15 절)
   - 설정 조회 11종·쓰기, 알람 릴레이, 이벤트 보관 3종 + 자동 복구, 미지원 명령 실패 ACK
